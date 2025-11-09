@@ -1,11 +1,11 @@
 // api/routes/user-routes.js
 // Purpose: User CRUD + admin/student listing, with Clerk auth and least-privilege data exposure.
 //
-// Conventions used here
-// - Every route that reads multiple users or arbitrary users is restricted to admin/instructor.
-// - Self-service routes check Clerk session -> resolve to Mongo user via clerkId.
-// - Queries use field projection + .lean() where safe to reduce payload & memory.
-// - Class roster edits on user delete are handled, no Conversation model reference.
+// Conventions
+// - Any route that reads many/arbitrary users is restricted to admin/instructor.
+// - “Self” routes resolve the Mongo user via Clerk session (clerkId).
+// - Use projection + .lean() where safe to reduce payloads.
+// - On user delete, remove them from any class rosters (no Conversation model here).
 
 import "dotenv/config";
 import express from "express";
@@ -18,17 +18,14 @@ import { requireAuth, requireAdminOrInstructor } from "../middleware/auth.js";
 
 const router = express.Router();
 
-// -----------------------------
-// Helpers
-// -----------------------------
+/* -----------------------------
+   Helpers
+------------------------------*/
 
-/** Return true if the user doc has admin or instructor privilege. */
+/** True if the user has admin or instructor privilege. */
 const isAdminOrInstructor = (u) => !!u && ["admin", "instructor"].includes(u.privilege);
 
-/**
- * Resolve current requester ("me") by Clerk session.
- * Assumes requireAuth already ran and set req.auth.userId.
- */
+/** Resolve the current requester (“me”) by Clerk session (assumes requireAuth already ran). */
 async function getMe(req) {
   const clerkId = req.auth?.userId;
   if (!clerkId) return null;
@@ -36,8 +33,8 @@ async function getMe(req) {
 }
 
 /**
- * Gate: allow if requester is admin/instructor OR requesting their own Mongo _id.
- * Expects :id in route params.
+ * Gate: allow if requester is admin/instructor OR is requesting their own Mongo _id.
+ * Expects :id in params and requireAuth upstream.
  */
 async function allowSelfOrPriv(req, res, next) {
   try {
@@ -49,11 +46,10 @@ async function allowSelfOrPriv(req, res, next) {
       return res.status(400).json({ message: "Invalid ID" });
     }
 
-    // Look up the target user and compare IDs
     const target = await User.findById(paramId).select("_id clerkId").lean();
     if (!target) return res.status(404).json({ message: "User not found" });
 
-    const isSelf = target && req.auth?.userId && target.clerkId === req.auth.userId;
+    const isSelf = target.clerkId === req.auth?.userId;
     return isSelf ? next() : res.status(403).json({ message: "Forbidden" });
   } catch (err) {
     console.error("allowSelfOrPriv error:", err);
@@ -61,23 +57,20 @@ async function allowSelfOrPriv(req, res, next) {
   }
 }
 
-// -----------------------------
-// Public signup
-// -----------------------------
+/* -----------------------------
+   Public signup
+------------------------------*/
 
-// Sign up (public) – creates Mongo profile after Clerk account creation on the client.
+// Creates Mongo profile after client-side Clerk account creation.
 router.post("/sign-up", async (req, res) => {
   try {
     const { firstName, lastName, email, whatsapp, clerkId } = req.body;
-
     if (!firstName || !lastName || !email || !clerkId) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
     const existingUser = await User.findOne({ email }).select("_id").lean();
-    if (existingUser) {
-      return res.status(409).json({ message: "Email already exists" });
-    }
+    if (existingUser) return res.status(409).json({ message: "Email already exists" });
 
     const newUser = await new User({ firstName, lastName, email, whatsapp, clerkId }).save();
     res.status(201).json(newUser);
@@ -87,28 +80,49 @@ router.post("/sign-up", async (req, res) => {
   }
 });
 
-// -----------------------------
-// Admin: list many users (restricted)
-// -----------------------------
+/* -----------------------------
+   Admin: list many users (restricted)
+------------------------------*/
 
-// Get Users (admin/instructor only); returns minimal profile fields.
-router.get("/users", requireAuth, requireAdminOrInstructor, async (_req, res) => {
+// GET /api/users[?privilege=instructor][&q=ali]
+// - Admin/instructor only
+// - Supports simple text search on firstName/lastName/email
+// - Projects minimal safe fields
+router.get("/users", requireAuth, requireAdminOrInstructor, async (req, res) => {
   try {
-    const users = await User.find({})
+    const { privilege, q } = req.query;
+
+    // Build a safe filter
+    const filter = {};
+    if (typeof privilege === "string" && privilege.trim()) {
+      filter.privilege = privilege.trim(); // e.g., "instructor" | "student" | "admin"
+    }
+    if (typeof q === "string" && q.trim()) {
+      const escape = (s) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+      const rx = new RegExp(escape(q.trim()), "i");
+      filter.$or = [{ firstName: rx }, { lastName: rx }, { email: rx }];
+    }
+
+    // Least-privilege projection; array shape for UI compatibility
+    const users = await User.find(filter)
       .select("firstName lastName email privilege creationDate")
+      .sort({ lastName: 1, firstName: 1 })
       .lean();
-    return res.status(200).json(users);
+
+    res.status(200).json(users);
   } catch (err) {
     console.error("Get users error:", err);
-    res.status(500).send(err);
+    res.status(500).json({ message: "Failed to fetch users" });
   }
 });
 
-// -----------------------------
-// Self or Admin: read/update/delete single user
-// -----------------------------
+/* -----------------------------
+   Self or Admin: read/update/delete single user
+------------------------------*/
 
-// Get User – admins can query arbitrary user via filters; non-admins get self.
+// GET /api/user
+// - Admin/instructor may query arbitrary user via ?_id / ?email / ?whatsapp
+// - Non-privileged users get their own profile (from Clerk session)
 router.get("/user", requireAuth, async (req, res) => {
   try {
     const allowedFields = ["_id", "email", "whatsapp"];
@@ -121,7 +135,6 @@ router.get("/user", requireAuth, async (req, res) => {
     if (isPriv && Object.keys(filters).length) {
       user = await User.findOne(filters).lean();
     } else {
-      // Non-admin/instructor: return own profile
       const clerkId = req.auth.userId;
       user = await User.findOne({ clerkId }).lean();
     }
@@ -134,7 +147,7 @@ router.get("/user", requireAuth, async (req, res) => {
   }
 });
 
-// Edit user – self or admin/instructor
+// PUT /api/user/:id  (self or admin/instructor)
 router.put("/user/:id", requireAuth, allowSelfOrPriv, async (req, res) => {
   try {
     const { id } = req.params;
@@ -149,7 +162,6 @@ router.put("/user/:id", requireAuth, allowSelfOrPriv, async (req, res) => {
 
     // If email changes, mirror in Clerk
     if (updates.email && originalUser.email !== updates.email) {
-      // Add new primary email on Clerk
       await clerkClient.emailAddresses.createEmailAddress({
         userId: originalUser.clerkId,
         emailAddress: updates.email,
@@ -157,7 +169,6 @@ router.put("/user/:id", requireAuth, allowSelfOrPriv, async (req, res) => {
         primary: true,
       });
 
-      // Remove old email from Clerk
       const clerkUser = await clerkClient.users.getUser(originalUser.clerkId);
       const oldEmail = clerkUser.emailAddresses.find(
         (e) => e.emailAddress === originalUser.email
@@ -179,7 +190,7 @@ router.put("/user/:id", requireAuth, allowSelfOrPriv, async (req, res) => {
   }
 });
 
-// Delete User – admin/instructor only
+// DELETE /api/user/:id  (admin/instructor only)
 router.delete("/user/:id", requireAuth, requireAdminOrInstructor, async (req, res) => {
   try {
     const { id } = req.params;
@@ -195,10 +206,7 @@ router.delete("/user/:id", requireAuth, requireAdminOrInstructor, async (req, re
       await Promise.all(
         deletedUser.enrolledClasses.map((classId) =>
           Class.findByIdAndUpdate(classId, { $pull: { roster: id } }).catch((err) => {
-            console.error(
-              `Failed to remove user ${id} from class ${classId} roster:`,
-              err
-            );
+            console.error(`Failed to remove user ${id} from class ${classId} roster:`, err);
             throw err;
           })
         )
@@ -216,76 +224,63 @@ router.delete("/user/:id", requireAuth, requireAdminOrInstructor, async (req, re
   }
 });
 
-// -----------------------------
-// Student class views
-// -----------------------------
+/* -----------------------------
+   Student class views
+------------------------------*/
 
-// Get student's classes (full details) – self or admin/instructor
-router.get(
-  "/students-classes/:id",
-  requireAuth,
-  allowSelfOrPriv,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      if (!mongoose.Types.ObjectId.isValid(id)) {
-        return res.status(400).json({ error: "Invalid ID" });
-      }
-
-      const classDetails = await User.findById(id)
-        .select("enrolledClasses")
-        .populate("enrolledClasses") // admin/instructor need full; students see their own
-        .lean();
-
-      if (!classDetails) return res.status(404).json({ message: "User not found" });
-      res.json(classDetails.enrolledClasses || []);
-    } catch (err) {
-      console.error("students-classes error:", err);
-      res.status(500).send(err);
+// GET /api/students-classes/:id  (self or admin/instructor)
+router.get("/students-classes/:id", requireAuth, allowSelfOrPriv, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid ID" });
     }
-  }
-);
 
-// -----------------------------
-// Admin Students (paginated)
-// -----------------------------
+    const classDetails = await User.findById(id)
+      .select("enrolledClasses")
+      .populate("enrolledClasses") // admin/instructor need full; students see their own
+      .lean();
+
+    if (!classDetails) return res.status(404).json({ message: "User not found" });
+    res.json(classDetails.enrolledClasses || []);
+  } catch (err) {
+    console.error("students-classes error:", err);
+    res.status(500).send(err);
+  }
+});
+
+/* -----------------------------
+   Admin Students (paginated)
+------------------------------*/
 
 // GET /api/students-with-classes?limit=100&page=1
-// Purpose: Replace N+1 per-student fetches with ONE paginated response.
+// Replaces N+1 per-student fetches with one paginated response.
 // Security: Clerk session + app role (admin or instructor) required.
-router.get(
-  "/students-with-classes",
-  requireAuth,
-  requireAdminOrInstructor,
-  async (req, res) => {
-    try {
-      // Pagination guards (cap limit to prevent huge payloads)
-      const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 100));
-      const page = Math.max(1, Number(req.query.page) || 1);
-      const skip = (page - 1) * limit;
+router.get("/students-with-classes", requireAuth, requireAdminOrInstructor, async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 100));
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const skip = (page - 1) * limit;
 
-      // Least-privilege selection (avoid PII like phone; avoid roster/links)
-      const userSelect = "firstName lastName email privilege enrolledClasses creationDate";
-      const classSelect = "level ageGroup instructor schedule isEnrollmentOpen image";
+    // Least-privilege selection (avoid PII; avoid roster/links)
+    const userSelect = "firstName lastName email privilege enrolledClasses creationDate";
+    const classSelect = "level ageGroup instructor schedule isEnrollmentOpen image";
 
-      // Run data fetch + total count in parallel for better latency
-      const [items, total] = await Promise.all([
-        User.find({ privilege: "student" })
-          .select(userSelect)
-          .skip(skip)
-          .limit(limit)
-          // Populate enrolled classes with safe fields only (no roster, no Classroom link)
-          .populate({ path: "enrolledClasses", select: classSelect })
-          .lean(), // return plain objects (faster, smaller)
-        User.countDocuments({ privilege: "student" }),
-      ]);
+    const [items, total] = await Promise.all([
+      User.find({ privilege: "student" })
+        .select(userSelect)
+        .skip(skip)
+        .limit(limit)
+        .populate({ path: "enrolledClasses", select: classSelect })
+        .lean(),
+      User.countDocuments({ privilege: "student" }),
+    ]);
 
-      res.json({ items, total, page, limit });
-    } catch (err) {
-      console.error("students-with-classes error:", err);
-      res.status(500).json({ message: "Failed to fetch students" });
-    }
+    res.json({ items, total, page, limit });
+  } catch (err) {
+    console.error("students-with-classes error:", err);
+    res.status(500).json({ message: "Failed to fetch students" });
   }
-);
+});
 
 export default router;
