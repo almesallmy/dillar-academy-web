@@ -13,23 +13,29 @@
 import { requireAuth as clerkRequireAuth } from '@clerk/express';
 import User from '../schemas/User.js';
 
+const hasClerkSecret = Boolean(process.env.CLERK_SECRET_KEY);
+
 // Session guard (adds req.auth on success)
-export const requireAuth = clerkRequireAuth();
+// If secret is present, use Clerk; else respond 503 gracefully.
+export const requireAuth = hasClerkSecret
+  ? clerkRequireAuth()
+  : (req, res) => res.status(503).json({ message: 'Auth disabled: missing CLERK_SECRET_KEY' });
 
 export async function requireAdminOrInstructor(req, res, next) {
   try {
+    if (!hasClerkSecret) {
+      return res.status(503).json({ message: 'Auth disabled: missing CLERK_SECRET_KEY' });
+    }
     const clerkId = req.auth?.userId; // set by requireAuth
     if (!clerkId) return res.status(401).json({ message: 'Unauthorized' });
 
-    // Check app-level role from Mongo
     const me = await User.findOne({ clerkId }).select('privilege').lean();
     if (!me || !['admin', 'instructor'].includes(me.privilege)) {
       return res.status(403).json({ message: 'Forbidden' });
     }
-
-    return next();
+    next();
   } catch (err) {
     console.error('requireAdminOrInstructor error:', err);
-    return res.status(500).json({ message: 'Auth check failed' });
+    res.status(500).json({ message: 'Auth check failed' });
   }
 }
