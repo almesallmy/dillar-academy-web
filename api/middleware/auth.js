@@ -1,26 +1,27 @@
 // api/middleware/auth.js
-// Purpose: Centralize authentication/authorization for Express routes.
+// Centralized authentication & authorization for Express routes.
 //
-// - requireAuth: ensures a valid Clerk session (401 if not signed in)
-// - requireAdminOrInstructor: allows only users with privilege "admin" or "instructor" (403 otherwise)
+// Exports:
+//   - requireAuth: ensures a valid Clerk session (401 if not signed in).
+//   - requireAdminOrInstructor: only allows users whose Mongo `privilege` is
+//     "admin" or "instructor" (403 otherwise).
 //
 // Prereqs:
-//   - CLERK_SECRET_KEY must be set in your environment (backend).
-//   - The signed-in Clerk user must have a matching users.clerkId document in Mongo.
+//   • Backend env must include CLERK_SECRET_KEY.
+//   • The signed-in Clerk user must have a matching users.clerkId in Mongo.
 
-import { ClerkExpressRequireAuth } from '@clerk/express';
+import { requireAuth as clerkRequireAuth } from '@clerk/express';
 import User from '../schemas/User.js';
 
-// Enforce that a request has a valid Clerk session.
-// Attaches `req.auth` with { userId, ... } when valid.
-export const requireAuth = ClerkExpressRequireAuth();
+// Session guard (adds req.auth on success)
+export const requireAuth = clerkRequireAuth();
 
 export async function requireAdminOrInstructor(req, res, next) {
   try {
-    const clerkId = req.auth?.userId;              // set by ClerkExpressRequireAuth
+    const clerkId = req.auth?.userId; // set by requireAuth
     if (!clerkId) return res.status(401).json({ message: 'Unauthorized' });
 
-    // Look up the app-level role in Mongo via Clerk user ID.
+    // Check app-level role from Mongo
     const me = await User.findOne({ clerkId }).select('privilege').lean();
     if (!me || !['admin', 'instructor'].includes(me.privilege)) {
       return res.status(403).json({ message: 'Forbidden' });
