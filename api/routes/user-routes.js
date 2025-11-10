@@ -103,7 +103,6 @@ router.get("/users", requireAuth, requireAdminOrInstructor, async (req, res) => 
       filter.$or = [{ firstName: rx }, { lastName: rx }, { email: rx }];
     }
 
-    // Least-privilege projection; array shape for UI compatibility
     const users = await User.find(filter)
       .select("firstName lastName email privilege creationDate")
       .sort({ lastName: 1, firstName: 1 })
@@ -225,36 +224,11 @@ router.delete("/user/:id", requireAuth, requireAdminOrInstructor, async (req, re
 });
 
 /* -----------------------------
-   Student class views
+   Admin Students (paginated, filterable)
 ------------------------------*/
 
-// GET /api/students-classes/:id  (self or admin/instructor)
-router.get("/students-classes/:id", requireAuth, allowSelfOrPriv, async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid ID" });
-    }
-
-    const classDetails = await User.findById(id)
-      .select("enrolledClasses")
-      .populate("enrolledClasses") // admin/instructor need full; students see their own
-      .lean();
-
-    if (!classDetails) return res.status(404).json({ message: "User not found" });
-    res.json(classDetails.enrolledClasses || []);
-  } catch (err) {
-    console.error("students-classes error:", err);
-    res.status(500).send(err);
-  }
-});
-
-/* -----------------------------
-   Admin Students (paginated)
-------------------------------*/
-
-// GET /api/students-with-classes?limit=100&page=1
-// Replaces N+1 per-student fetches with one paginated response.
+// GET /api/students-with-classes?limit=100&page=1[&level=3|conversation|ielts][&q=ali]
+// Purpose: server-driven pagination and accurate totals with optional level + text filters.
 // Security: Clerk session + app role (admin or instructor) required.
 router.get("/students-with-classes", requireAuth, requireAdminOrInstructor, async (req, res) => {
   try {
@@ -262,19 +236,88 @@ router.get("/students-with-classes", requireAuth, requireAdminOrInstructor, asyn
     const page = Math.max(1, Number(req.query.page) || 1);
     const skip = (page - 1) * limit;
 
-    // Least-privilege selection (avoid PII; avoid roster/links)
-    const userSelect = "firstName lastName email privilege enrolledClasses creationDate";
-    const classSelect = "level ageGroup instructor schedule isEnrollmentOpen image";
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const levelRaw = typeof req.query.level === "string" ? req.query.level.trim() : "";
+    const levelFilter = levelRaw === "" ? null : (Number.isNaN(Number(levelRaw)) ? levelRaw : Number(levelRaw));
 
-    const [items, total] = await Promise.all([
-      User.find({ privilege: "student" })
-        .select(userSelect)
-        .skip(skip)
-        .limit(limit)
-        .populate({ path: "enrolledClasses", select: classSelect })
-        .lean(),
-      User.countDocuments({ privilege: "student" }),
-    ]);
+    const pipeline = [];
+
+    // 1) Base: students only
+    pipeline.push({ $match: { privilege: "student" } });
+
+    // 2) Optional text search
+    if (q) {
+      const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rx = new RegExp(escape(q), "i");
+      pipeline.push({ $match: { $or: [{ firstName: rx }, { lastName: rx }, { email: rx }] } });
+    }
+
+    // 3) Join enrolled class docs
+    pipeline.push({
+      $lookup: {
+        from: "classes",
+        localField: "enrolledClasses",
+        foreignField: "_id",
+        as: "enrolledClasses"
+      }
+    });
+
+    // 4) Project safe class fields only
+    pipeline.push({
+      $project: {
+        firstName: 1,
+        lastName: 1,
+        email: 1,
+        privilege: 1,
+        creationDate: 1,
+        enrolledClasses: {
+          $map: {
+            input: "$enrolledClasses",
+            as: "c",
+            in: {
+              level: "$$c.level",
+              ageGroup: "$$c.ageGroup",
+              instructor: "$$c.instructor",
+              schedule: "$$c.schedule",
+              isEnrollmentOpen: "$$c.isEnrollmentOpen",
+              image: "$$c.image"
+            }
+          }
+        }
+      }
+    });
+
+    // 5) Optional class level filter (retain only classes that match; drop students with none)
+    if (levelFilter !== null) {
+      pipeline.push({
+        $set: {
+          enrolledClasses: {
+            $filter: {
+              input: "$enrolledClasses",
+              as: "c",
+              cond: { $eq: ["$$c.level", levelFilter] }
+            }
+          }
+        }
+      });
+      pipeline.push({ $match: { "enrolledClasses.0": { $exists: true } } });
+    }
+
+    // 6) Stable sort for UX
+    pipeline.push({ $sort: { lastName: 1, firstName: 1, _id: 1 } });
+
+    // 7) Facet for page + total count
+    pipeline.push({
+      $facet: {
+        items: [{ $skip: skip }, { $limit: limit }],
+        total: [{ $count: "count" }]
+      }
+    });
+
+    const agg = await User.aggregate(pipeline).exec();
+    const facet = Array.isArray(agg) ? agg[0] : { items: [], total: [] };
+    const items = facet.items ?? [];
+    const total = facet.total?.[0]?.count ?? 0;
 
     res.json({ items, total, page, limit });
   } catch (err) {

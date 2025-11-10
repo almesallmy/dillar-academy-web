@@ -31,20 +31,26 @@ const updateUser = async (userId, userData) => {
 };
 
 /**
- * NEW: Paginated admin fetch that returns students WITH their class objects in one call.
- * Backend: GET /api/students-with-classes?limit=100&page=1
+ * Server-driven, paginated fetch of students with their class details.
+ * Query params:
+ *   - page (1-based), limit
+ *   - level: number | "conversation" | "ielts" (optional)
+ *   - q: text search over first/last/email (optional)
+ * Returns: { items, total, page, limit }
  */
-const getStudentsWithClasses = async ({ page = 1, limit = 100 } = {}) => {
+const getStudentsWithClasses = async ({ page = 1, limit = 100, level = null, q = '' } = {}) => {
   const { data } = await axios.get('/api/students-with-classes', {
-    params: { page, limit },
+    params: {
+      page,
+      limit,
+      ...(level !== null ? { level } : {}),
+      ...(q ? { q } : {})
+    }
   });
-  return data; // { items, total, page, limit }
+  return data;
 };
 
-/**
- * DEPRECATED: N+1 per-student fetch (kept for backward-compat while migrating UI).
- * Prefer getStudentsWithClasses().
- */
+/** Deprecated: per-student class fetch; prefer getStudentsWithClasses() */
 const getStudentsClasses = async (studentId) => {
   const { data } = await axios.get(`/api/students-classes/${studentId}`);
   return data;
@@ -65,8 +71,8 @@ export {
   getUsers,
   getUser,
   updateUser,
-  getStudentsWithClasses, // <- use this in Admin/Students
-  getStudentsClasses,     // deprecated
+  getStudentsWithClasses,
+  getStudentsClasses, // deprecated
   getStudentsForExport,
   deleteUser,
 };
