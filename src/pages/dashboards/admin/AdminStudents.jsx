@@ -99,23 +99,30 @@ const AdminStudents = () => {
 
   // (Re)load when filters/search change
   useEffect(() => {
-    if (allowRender) loadPage(1); // reset to page 1 on filter/search
+    if (allowRender) {
+      // optimistic reset to page 1 so paginator UI updates immediately
+      setPage(1);
+      loadPage(1);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currFilter, searchInput]);
 
-  // Centralized loader
+  // Centralized loader (with optimistic page update support)
   async function loadPage(nextPage) {
     try {
+      // Optimistic page update: reflect target page immediately
+      setPage(nextPage);
       setLoading(true);
+
       const { items, total: t } = await getStudentsWithClasses({
         page: nextPage,
         limit: PAGE_SIZE,
         level: currFilter ?? null,
         q: searchInput.trim(),
       });
+
       setStudents(items || []);
       setTotal(t || 0);
-      setPage(nextPage);
     } catch (err) {
       const status = err?.response?.status;
       if (status === 401 || status === 403) setLocation("/login");
@@ -243,7 +250,10 @@ const AdminStudents = () => {
             page={page}
             total={total}
             limit={PAGE_SIZE}
-            onChange={(p) => loadPage(p)}
+            busy={loading}              {/* disable buttons while fetching */}
+            onChange={(p) => {
+              if (p !== page) loadPage(p);
+            }}
           />
         </div>
       )}
