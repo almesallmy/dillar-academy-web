@@ -1,11 +1,5 @@
 // api/routes/user-routes.js
 // Purpose: User CRUD + admin/student listing, with Clerk auth and least-privilege data exposure.
-//
-// Conventions
-// - Any route that reads many/arbitrary users is restricted to admin/instructor.
-// - “Self” routes resolve the Mongo user via Clerk session (clerkId).
-// - Use projection + .lean() where safe to reduce payloads.
-// - On user delete, remove them from any class rosters (no Conversation model here).
 
 import "dotenv/config";
 import express from "express";
@@ -22,20 +16,14 @@ const router = express.Router();
    Helpers
 ------------------------------*/
 
-/** True if the user has admin or instructor privilege. */
 const isAdminOrInstructor = (u) => !!u && ["admin", "instructor"].includes(u.privilege);
 
-/** Resolve the current requester (“me”) by Clerk session (assumes requireAuth already ran). */
 async function getMe(req) {
   const clerkId = req.auth?.userId;
   if (!clerkId) return null;
   return User.findOne({ clerkId }).select("privilege").lean();
 }
 
-/**
- * Gate: allow if requester is admin/instructor OR is requesting their own Mongo _id.
- * Expects :id in params and requireAuth upstream.
- */
 async function allowSelfOrPriv(req, res, next) {
   try {
     const me = await getMe(req);
@@ -57,11 +45,12 @@ async function allowSelfOrPriv(req, res, next) {
   }
 }
 
+const escapeRx = (s) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+
 /* -----------------------------
    Public signup
 ------------------------------*/
 
-// Creates Mongo profile after client-side Clerk account creation.
 router.post("/sign-up", async (req, res) => {
   try {
     const { firstName, lastName, email, whatsapp, clerkId } = req.body;
@@ -85,48 +74,45 @@ router.post("/sign-up", async (req, res) => {
 ------------------------------*/
 
 // GET /api/users
-// Optional query params:
-//   - privilege=instructor|student|admin
-//   - q=free text (matches firstName/lastName/email, case-insensitive)
-//   - page (1-based) and limit for pagination
-//
-// Behavior:
-//   • If page is provided -> returns { items, total, page, limit } (paginated).
-//   • If page is omitted   -> returns an array (backward-compatible).
+// Optional: privilege, q, page, limit
 router.get("/users", requireAuth, requireAdminOrInstructor, async (req, res) => {
   try {
     const { privilege, q } = req.query;
     const page = Number(req.query.page);
     const limit = Number(req.query.limit);
 
-    // Build a safe filter
     const filter = {};
     if (typeof privilege === "string" && privilege.trim()) {
-      filter.privilege = privilege.trim(); // "instructor" | "student" | "admin"
+      filter.privilege = privilege.trim();
     }
     if (typeof q === "string" && q.trim()) {
-      const escape = (s) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-      const rx = new RegExp(escape(q.trim()), "i");
+      const rx = new RegExp(escapeRx(q.trim()), "i");
       filter.$or = [{ firstName: rx }, { lastName: rx }, { email: rx }];
     }
 
     const projection = "firstName lastName email privilege creationDate";
 
-    // If pagination requested
     if (!Number.isNaN(page) && page > 0 && !Number.isNaN(limit) && limit > 0) {
       const cappedLimit = Math.min(200, Math.max(1, limit));
       const skip = (page - 1) * cappedLimit;
 
       const [items, total] = await Promise.all([
-        User.find(filter).select(projection).sort({ lastName: 1, firstName: 1 }).skip(skip).limit(cappedLimit).lean(),
+        User.find(filter)
+          .select(projection)
+          .sort({ lastName: 1, firstName: 1 })
+          .skip(skip)
+          .limit(cappedLimit)
+          .lean(),
         User.countDocuments(filter),
       ]);
 
       return res.status(200).json({ items, total, page, limit: cappedLimit });
     }
 
-    // Legacy behavior (no pagination params)
-    const users = await User.find(filter).select(projection).sort({ lastName: 1, firstName: 1 }).lean();
+    const users = await User.find(filter)
+      .select(projection)
+      .sort({ lastName: 1, firstName: 1 })
+      .lean();
     res.status(200).json(users);
   } catch (err) {
     console.error("Get users error:", err);
@@ -138,9 +124,6 @@ router.get("/users", requireAuth, requireAdminOrInstructor, async (req, res) => 
    Self or Admin: read/update/delete single user
 ------------------------------*/
 
-// GET /api/user
-// - Admin/instructor may query arbitrary user via ?_id / ?email / ?whatsapp
-// - Non-privileged users get their own profile (from Clerk session)
 router.get("/user", requireAuth, async (req, res) => {
   try {
     const allowedFields = ["_id", "email", "whatsapp"];
@@ -165,7 +148,6 @@ router.get("/user", requireAuth, async (req, res) => {
   }
 });
 
-// PUT /api/user/:id  (self or admin/instructor)
 router.put("/user/:id", requireAuth, allowSelfOrPriv, async (req, res) => {
   try {
     const { id } = req.params;
@@ -178,7 +160,6 @@ router.put("/user/:id", requireAuth, allowSelfOrPriv, async (req, res) => {
     const originalUser = await User.findById(id);
     if (!originalUser) return res.status(404).json({ message: "User not found" });
 
-    // If email changes, mirror in Clerk
     if (updates.email && originalUser.email !== updates.email) {
       await clerkClient.emailAddresses.createEmailAddress({
         userId: originalUser.clerkId,
@@ -206,7 +187,6 @@ router.put("/user/:id", requireAuth, allowSelfOrPriv, async (req, res) => {
   }
 });
 
-// DELETE /api/user/:id  (admin/instructor only)
 router.delete("/user/:id", requireAuth, requireAdminOrInstructor, async (req, res) => {
   try {
     const { id } = req.params;
@@ -217,7 +197,6 @@ router.delete("/user/:id", requireAuth, requireAdminOrInstructor, async (req, re
     const deletedUser = await User.findById(id);
     if (!deletedUser) return res.status(404).json({ message: "User not found" });
 
-    // Remove the user from any class rosters
     if (Array.isArray(deletedUser.enrolledClasses) && deletedUser.enrolledClasses.length) {
       await Promise.all(
         deletedUser.enrolledClasses.map((classId) =>
@@ -229,7 +208,6 @@ router.delete("/user/:id", requireAuth, requireAdminOrInstructor, async (req, re
       );
     }
 
-    // Delete Clerk user, then Mongo user
     await clerkClient.users.deleteUser(deletedUser.clerkId);
     await User.findByIdAndDelete(id);
 
@@ -244,7 +222,6 @@ router.delete("/user/:id", requireAuth, requireAdminOrInstructor, async (req, re
    Student class views
 ------------------------------*/
 
-// GET /api/students-classes/:id  (self or admin/instructor)
 router.get("/students-classes/:id", requireAuth, allowSelfOrPriv, async (req, res) => {
   try {
     const { id } = req.params;
@@ -254,7 +231,7 @@ router.get("/students-classes/:id", requireAuth, allowSelfOrPriv, async (req, re
 
     const classDetails = await User.findById(id)
       .select("enrolledClasses")
-      .populate("enrolledClasses") // admin/instructor need full; students see their own
+      .populate("enrolledClasses")
       .lean();
 
     if (!classDetails) return res.status(404).json({ message: "User not found" });
@@ -266,30 +243,67 @@ router.get("/students-classes/:id", requireAuth, allowSelfOrPriv, async (req, re
 });
 
 /* -----------------------------
-   Admin Students (paginated)
+   Admin Students (paginated + filters)
 ------------------------------*/
 
-// GET /api/students-with-classes?limit=100&page=1
-// Replaces N+1 per-student fetches with one paginated response.
-// Security: Clerk session + app role (admin or instructor) required.
+// GET /api/students-with-classes?limit=100&page=1[&level=1|conversation|ielts][&q=...]
 router.get("/students-with-classes", requireAuth, requireAdminOrInstructor, async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 100));
     const page = Math.max(1, Number(req.query.page) || 1);
     const skip = (page - 1) * limit;
 
-    // Least-privilege selection (avoid PII; avoid roster/links)
+    const { level: levelParam, q } = req.query;
+
+    // Build class-based filters first (for level and/or text on class fields)
+    const classIdFilters = [];
+
+    // Level filter (number or string: "conversation" | "ielts")
+    if (typeof levelParam !== "undefined" && levelParam !== null && `${levelParam}`.trim() !== "") {
+      const raw = `${levelParam}`.trim();
+      const parsed = Number.isNaN(Number(raw)) ? raw.toLowerCase() : Number(raw);
+      const levelClasses = await Class.find({ level: parsed }).select("_id").lean();
+      const ids = levelClasses.map((c) => c._id);
+      if (!ids.length) {
+        return res.json({ items: [], total: 0, page, limit });
+      }
+      classIdFilters.push({ enrolledClasses: { $in: ids } });
+    }
+
+    // Optional q: match user name/email OR class instructor/ageGroup
+    const userOr = [];
+    if (typeof q === "string" && q.trim()) {
+      const rx = new RegExp(escapeRx(q.trim()), "i");
+      userOr.push({ firstName: rx }, { lastName: rx }, { email: rx });
+
+      const qClasses = await Class.find({ $or: [{ instructor: rx }, { ageGroup: rx }] })
+        .select("_id")
+        .lean();
+      const qIds = qClasses.map((c) => c._id);
+      if (qIds.length) classIdFilters.push({ enrolledClasses: { $in: qIds } });
+    }
+
+    // Final user filter
+    const userFilter = { privilege: "student" };
+    if (userOr.length || classIdFilters.length) {
+      userFilter.$and = [];
+      if (userOr.length) userFilter.$and.push({ $or: userOr });
+      if (classIdFilters.length) userFilter.$and.push({ $and: classIdFilters });
+      if (!userFilter.$and.length) delete userFilter.$and;
+    }
+
     const userSelect = "firstName lastName email privilege enrolledClasses creationDate";
     const classSelect = "level ageGroup instructor schedule isEnrollmentOpen image";
 
     const [items, total] = await Promise.all([
-      User.find({ privilege: "student" })
+      User.find(userFilter)
         .select(userSelect)
+        .sort({ lastName: 1, firstName: 1 })
         .skip(skip)
         .limit(limit)
         .populate({ path: "enrolledClasses", select: classSelect })
         .lean(),
-      User.countDocuments({ privilege: "student" }),
+      User.countDocuments(userFilter),
     ]);
 
     res.json({ items, total, page, limit });

@@ -1,6 +1,5 @@
 // src/pages/dashboards/admin/AdminStudents.jsx
-// Admin-only list of students with their enrolled classes.
-// Uses server-driven pagination & filters via /api/students-with-classes.
+// Admin list of students using server-driven pagination & filters.
 
 import { useContext, useEffect, useMemo, useState } from "react";
 import { UserContext } from "@/contexts/UserContext.jsx";
@@ -22,20 +21,19 @@ import ExcelExport from "export-xlsx";
 import { SETTINGS_FOR_EXPORT } from "@/assets/excel_export_settings";
 import Pagination from "@/components/Pagination/Pagination.jsx";
 
-const PAGE_SIZE = 100; // capped by backend at 200
-
-// Normalize level item value (number[] or {level:number}[])
+const PAGE_SIZE = 100;
 const levelValue = (lv) => (typeof lv === "number" ? lv : lv?.level);
+const levelLabel = (val) =>
+  typeof val === "number" ? `Level ${val}` : val === "ielts" ? "IELTS" : "Conversation";
 
 const AdminStudents = () => {
   const { user } = useContext(UserContext);
   const [, setLocation] = useLocation();
   const { isSignedIn, isLoaded } = useAuth();
 
-  // Data + UI state
   const [loading, setLoading] = useState(true);
-  const [students, setStudents] = useState([]);     // current page items from API
-  const [total, setTotal] = useState(0);            // total rows matching filters (server)
+  const [students, setStudents] = useState([]);
+  const [total, setTotal] = useState(0);
   const [levels, setLevels] = useState([]);
   const [page, setPage] = useState(1);
   const [currFilter, setCurrFilter] = useState(null); // number | "conversation" | "ielts" | null
@@ -43,29 +41,24 @@ const AdminStudents = () => {
   const [allowRender, setAllowRender] = useState(false);
   const showSkeleton = useDelayedSkeleton(loading);
 
-  // Derived label for header counter
-  const headerCount = useMemo(() => {
-    return `${total} student(s)`;
-  }, [total]);
+  const headerCount = useMemo(() => `${total} student(s)`, [total]);
 
-  // Redirect if not signed in; else load first page
   useEffect(() => {
     if (!isLoaded) return;
-
     if (!isSignedIn) {
       setLocation("/login");
       return;
     }
-
     (async () => {
       try {
         setLoading(true);
         const lvls = await getLevels();
-        setLevels(lvls || []);
+        // ensure numeric levels are sorted ascending
+        setLevels([...(lvls || [])].sort((a, b) => levelValue(a) - levelValue(b)));
         await loadPage(1);
         setAllowRender(true);
-      } catch (err) {
-        console.error("AdminStudents init error:", err);
+      } catch (e) {
+        console.error("AdminStudents init error:", e);
       } finally {
         setLoading(false);
       }
@@ -73,16 +66,11 @@ const AdminStudents = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoaded, isSignedIn, user?._id]);
 
-  // (Re)load when filters/search change
   useEffect(() => {
-    // reset to page 1 on any filter/search change
-    if (allowRender) {
-      loadPage(1);
-    }
+    if (allowRender) loadPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currFilter, searchInput]);
 
-  // Centralized loader
   async function loadPage(nextPage) {
     try {
       setLoading(true);
@@ -104,12 +92,10 @@ const AdminStudents = () => {
     }
   }
 
-  // Guard: only admins can view this page
   if (user && user.privilege !== "admin") {
     return <Unauthorized />;
   }
 
-  // Export as Excel (server returns pre-shaped export data)
   const handleExportStudents = async () => {
     try {
       const data = await getStudentsForExport();
@@ -141,7 +127,7 @@ const AdminStudents = () => {
           label={
             <div className="flex items-center justify-center gap-x-1">
               <span className="whitespace-nowrap">
-                {currFilter ? `Level ${currFilter}` : "All Levels"}
+                {currFilter ? levelLabel(currFilter) : "All Levels"}
               </span>
             </div>
           }
@@ -157,7 +143,7 @@ const AdminStudents = () => {
             All Levels
           </button>
 
-          {/* Numeric levels from API */}
+          {/* Numeric levels */}
           {levels.map((lv) => {
             const val = levelValue(lv);
             return (
@@ -214,15 +200,9 @@ const AdminStudents = () => {
         )}
       </div>
 
-      {/* Numbered pagination (accurate because API returns filtered total) */}
       {allowRender && total > 0 && (
         <div className="pt-6">
-          <Pagination
-            page={page}
-            total={total}
-            limit={PAGE_SIZE}
-            onChange={(p) => loadPage(p)}
-          />
+          <Pagination page={page} total={total} limit={PAGE_SIZE} onChange={(p) => loadPage(p)} />
         </div>
       )}
     </div>
