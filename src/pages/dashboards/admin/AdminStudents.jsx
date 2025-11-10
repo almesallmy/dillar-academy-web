@@ -1,5 +1,6 @@
 // src/pages/dashboards/admin/AdminStudents.jsx
-// Admin list of students using server-driven pagination & filters.
+// Admin-only list of students with their enrolled classes.
+// Uses server-driven pagination & filters via /api/students-with-classes.
 
 import { useContext, useEffect, useMemo, useState } from "react";
 import { UserContext } from "@/contexts/UserContext.jsx";
@@ -21,19 +22,31 @@ import ExcelExport from "export-xlsx";
 import { SETTINGS_FOR_EXPORT } from "@/assets/excel_export_settings";
 import Pagination from "@/components/Pagination/Pagination.jsx";
 
-const PAGE_SIZE = 100;
-const levelValue = (lv) => (typeof lv === "number" ? lv : lv?.level);
-const levelLabel = (val) =>
-  typeof val === "number" ? `Level ${val}` : val === "ielts" ? "IELTS" : "Conversation";
+const PAGE_SIZE = 100; // capped by backend at 200
+
+// Extract a usable value from a level item:
+//  - numbers: 1, 2, ...
+//  - strings like "Level 3": -> 3
+//  - objects like { level: 3 } or { level: "Level 3" } -> 3
+function normalizeLevelValue(lv) {
+  const raw = typeof lv === "object" && lv !== null ? lv.level : lv;
+  if (typeof raw === "number") return raw;
+  if (typeof raw === "string") {
+    const m = raw.match(/\d+/); // first integer inside the string
+    return m ? Number(m[0]) : raw; // fall back to string if no number present
+  }
+  return raw ?? ""; // last resort
+}
 
 const AdminStudents = () => {
   const { user } = useContext(UserContext);
   const [, setLocation] = useLocation();
   const { isSignedIn, isLoaded } = useAuth();
 
+  // Data + UI state
   const [loading, setLoading] = useState(true);
-  const [students, setStudents] = useState([]);
-  const [total, setTotal] = useState(0);
+  const [students, setStudents] = useState([]);     // current page items from API
+  const [total, setTotal] = useState(0);            // total rows matching filters (server)
   const [levels, setLevels] = useState([]);
   const [page, setPage] = useState(1);
   const [currFilter, setCurrFilter] = useState(null); // number | "conversation" | "ielts" | null
@@ -41,24 +54,42 @@ const AdminStudents = () => {
   const [allowRender, setAllowRender] = useState(false);
   const showSkeleton = useDelayedSkeleton(loading);
 
+  // Sort levels numerically if possible (e.g., "Level 0" before "Level 1")
+  const sortedLevels = useMemo(() => {
+    const list = Array.isArray(levels) ? [...levels] : [];
+    return list.sort((a, b) => {
+      const va = normalizeLevelValue(a);
+      const vb = normalizeLevelValue(b);
+      const na = typeof va === "number";
+      const nb = typeof vb === "number";
+      if (na && nb) return va - vb;
+      if (na && !nb) return -1;
+      if (!na && nb) return 1;
+      return String(va).localeCompare(String(vb));
+    });
+  }, [levels]);
+
+  // Derived label for header counter
   const headerCount = useMemo(() => `${total} student(s)`, [total]);
 
+  // Redirect if not signed in; else load first page
   useEffect(() => {
     if (!isLoaded) return;
+
     if (!isSignedIn) {
       setLocation("/login");
       return;
     }
+
     (async () => {
       try {
         setLoading(true);
         const lvls = await getLevels();
-        // ensure numeric levels are sorted ascending
-        setLevels([...(lvls || [])].sort((a, b) => levelValue(a) - levelValue(b)));
+        setLevels(lvls || []);
         await loadPage(1);
         setAllowRender(true);
-      } catch (e) {
-        console.error("AdminStudents init error:", e);
+      } catch (err) {
+        console.error("AdminStudents init error:", err);
       } finally {
         setLoading(false);
       }
@@ -66,11 +97,13 @@ const AdminStudents = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoaded, isSignedIn, user?._id]);
 
+  // (Re)load when filters/search change
   useEffect(() => {
-    if (allowRender) loadPage(1);
+    if (allowRender) loadPage(1); // reset to page 1 on filter/search
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currFilter, searchInput]);
 
+  // Centralized loader
   async function loadPage(nextPage) {
     try {
       setLoading(true);
@@ -92,10 +125,12 @@ const AdminStudents = () => {
     }
   }
 
+  // Guard: only admins can view this page
   if (user && user.privilege !== "admin") {
     return <Unauthorized />;
   }
 
+  // Export as Excel (server returns pre-shaped export data)
   const handleExportStudents = async () => {
     try {
       const data = await getStudentsForExport();
@@ -127,7 +162,7 @@ const AdminStudents = () => {
           label={
             <div className="flex items-center justify-center gap-x-1">
               <span className="whitespace-nowrap">
-                {currFilter ? levelLabel(currFilter) : "All Levels"}
+                {currFilter ? `Level ${currFilter}` : "All Levels"}
               </span>
             </div>
           }
@@ -143,18 +178,20 @@ const AdminStudents = () => {
             All Levels
           </button>
 
-          {/* Numeric levels */}
-          {levels.map((lv) => {
-            const val = levelValue(lv);
+          {/* Numeric levels (sorted) */}
+          {sortedLevels.map((lv) => {
+            const val = normalizeLevelValue(lv);
+            const isNumber = typeof val === "number";
+            const label = isNumber ? `Level ${val}` : String(val);
             return (
               <button
-                key={`lvl-${val}`}
+                key={`lvl-${label}`}
                 className={`w-full text-left px-4 py-2 text-base font-normal text-black hover:bg-gray-100 ${
                   currFilter === val ? "text-blue-500 bg-gray-50" : "text-gray-700"
                 }`}
                 onClick={() => setCurrFilter(val)}
               >
-                Level {val}
+                {label}
               </button>
             );
           })}
@@ -202,7 +239,12 @@ const AdminStudents = () => {
 
       {allowRender && total > 0 && (
         <div className="pt-6">
-          <Pagination page={page} total={total} limit={PAGE_SIZE} onChange={(p) => loadPage(p)} />
+          <Pagination
+            page={page}
+            total={total}
+            limit={PAGE_SIZE}
+            onChange={(p) => loadPage(p)}
+          />
         </div>
       )}
     </div>
