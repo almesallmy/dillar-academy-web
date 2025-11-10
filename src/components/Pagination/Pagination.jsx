@@ -18,20 +18,27 @@ function getWindow(current, totalPages, windowSize = 5) {
   return range(start, end);
 }
 
-const Pagination = ({ page, total, limit, onChange }) => {
+const Pagination = ({ page, total, limit, onChange, busy = false }) => {
   const totalPages = Math.max(1, Math.ceil((total || 0) / (limit || 1)));
   const windowPages = getWindow(page, totalPages, 7);
+
+  const goto = (p) => {
+    if (busy) return;
+    const clamped = Math.max(1, Math.min(p, totalPages));
+    if (clamped === page) return; // guard same-page calls
+    onChange(clamped);
+  };
 
   return (
     <div className="flex flex-wrap items-center justify-center gap-2">
       <Button
         label="Prev"
-        disabled={page <= 1}
-        onClick={() => onChange(page - 1)}
+        disabled={busy || page <= 1}
+        onClick={() => goto(page - 1)}
       />
       {windowPages[0] > 1 && (
         <>
-          <Button label="1" onClick={() => onChange(1)} />
+          <Button label="1" onClick={() => goto(1)} disabled={busy} />
           <span className="px-1">…</span>
         </>
       )}
@@ -39,20 +46,20 @@ const Pagination = ({ page, total, limit, onChange }) => {
         <Button
           key={p}
           label={String(p)}
-          onClick={() => onChange(p)}
-          disabled={p === page}
+          onClick={() => goto(p)}
+          disabled={busy || p === page}
         />
       ))}
       {windowPages[windowPages.length - 1] < totalPages && (
         <>
           <span className="px-1">…</span>
-          <Button label={String(totalPages)} onClick={() => onChange(totalPages)} />
+          <Button label={String(totalPages)} onClick={() => goto(totalPages)} disabled={busy} />
         </>
       )}
       <Button
         label="Next"
-        onClick={() => onChange(page + 1)}
-        disabled={page >= totalPages}
+        onClick={() => goto(page + 1)}
+        disabled={busy || page >= totalPages}
       />
     </div>
   );

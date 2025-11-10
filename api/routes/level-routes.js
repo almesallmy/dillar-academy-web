@@ -6,13 +6,13 @@ import { deleteLevelTranslations, createLevelTranslations } from "../../src/util
 
 const router = express.Router();
 
-// Get Levels
+// Get Levels (sorted ascending by numeric level)
 router.get("/", async (req, res) => {
   try {
     const allowedFields = ['level'];
     const filters = validateInput(req.query, allowedFields);
 
-    const data = await Level.find(filters);
+    const data = await Level.find(filters).sort({ level: 1 }).lean();
     res.json(data);
   } catch (err) {
     res.status(500).send(err);
@@ -85,11 +85,8 @@ router.put('/:id', async (req, res) => {
     );
 
     // Update translations
-    // delete existing translations 
     await deleteLevelTranslations(currentLevel);
-    // create new translations
     await createLevelTranslations(updatedLevel);
-    // translations transferred to MongoDB in updateLevel wrapper
 
     if (!updatedLevel) {
       return res.status(404).json({ message: 'Level not found' });
