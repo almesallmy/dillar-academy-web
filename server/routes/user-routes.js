@@ -8,7 +8,7 @@ import User from "../schemas/User.js";
 import Class from "../schemas/Class.js";
 import { clerkClient } from "@clerk/express";
 import { validateInput } from "../../src/utils/backend/validate-utils.js";
-import { requireAuth, requireAdminOrInstructor } from "../middleware/auth.js";
+import { requireAuth, requireAdminOrInstructor } from "../../server/middleware/auth.js";
 
 const router = express.Router();
 

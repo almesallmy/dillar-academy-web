@@ -15,24 +15,24 @@ import mongoSanitize from "express-mongo-sanitize";
 import { validateInput } from "../src/utils/backend/validate-utils.js";
 
 // Schemas (used by a few legacy endpoints below)
-import User from "./schemas/User.js";
-import Class from "./schemas/Class.js";
+import User from "../server/schemas/User.js";
+import Class from "../server/schemas/Class.js";
 
 // Routers
-import translationRoutes from "./routes/translation-routes.js";
-import emailRoutes from "./routes/email-routes.js";
-import userRoutes from "./routes/user-routes.js";
-import levelRoutes from "./routes/level-routes.js";
-import classRoutes from "./routes/class-routes.js";
+import translationRoutes from "../server/routes/translation-routes.js";
+import emailRoutes from "../server/routes/email-routes.js";
+import userRoutes from "../server/routes/user-routes.js";
+import levelRoutes from "../server/routes/level-routes.js";
+import classRoutes from "../server/routes/class-routes.js";
 
 // Memoized DB connection (must export a function that reuses an existing conn)
-import { dbConnect } from "./db.js";
+import { dbConnect } from "../server/db.js";
 
 // Security middleware (Helmet + CSP), centralized in /middleware
-import security from "./middleware/security.js";
+import security from "../server/middleware/security.js";
 
 // Rate limiting
-import { apiLimiter, burstLimiter } from "./middleware/rate-limit.js";
+import { apiLimiter, burstLimiter } from "../server/middleware/rate-limit.js";
 
 const app = express();
 
