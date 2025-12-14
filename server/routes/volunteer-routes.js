@@ -1,21 +1,61 @@
 // server/routes/volunteer-routes.js
+// Volunteer application endpoints:
+// - POST /apply (public)
+// - GET  /all (admin/instructor)
+// - PATCH /:id/status (admin/instructor)
+// - GET /export.csv (admin/instructor)
+//
+// Notes:
+// - Honeypot field ("website") returns success if filled (bot trap).
+// - Optional email notifications.
+
 import express from "express";
 import mongoose from "mongoose";
 import { dbConnect } from "../db.js";
 import Volunteer from "../schemas/Volunteer.js";
 import { validateInput } from "../../src/utils/backend/validate-utils.js";
-
-// Auth (Clerk)
 import { requireAuth, requireAdminOrInstructor } from "../middleware/auth.js";
 
 const router = express.Router();
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const TIMEZONE_RE = /^UTC[+-]\d{2}:\d{2}$/;
 
 const ROLE_INTEREST = new Set(["teach", "admin", "both"]);
-const WEEKLY_HOURS = new Set(["1", "2", "more"]);
-const UYGHUR = new Set(["fluent", "somewhat", "no"]);
+const WEEKLY_HOURS = new Set(["lt1", "1_2", "3_5", "6_plus"]);
+const UYGHUR = new Set(["fluent_native", "professional", "conversational", "none"]);
+const PREF_TIME = new Set(["morning", "afternoon", "evening", "flexible"]);
 const STATUS = new Set(["pending", "approved", "rejected"]);
+
+function labelWeeklyHours(v) {
+  const map = {
+    lt1: "Less than 1 hour / week",
+    "1_2": "1–2 hours / week",
+    "3_5": "3–5 hours / week",
+    "6_plus": "6+ hours / week",
+  };
+  return map[v] || v || "-";
+}
+
+function labelUyghur(v) {
+  const map = {
+    fluent_native: "Fluent / Native",
+    professional: "Professional working proficiency",
+    conversational: "Conversational",
+    none: "Not proficient",
+  };
+  return map[v] || v || "-";
+}
+
+function labelPreferredTime(v) {
+  const map = {
+    morning: "Morning",
+    afternoon: "Afternoon",
+    evening: "Evening",
+    flexible: "Flexible",
+  };
+  return map[v] || v || "-";
+}
 
 /**
  * Optional email notifications:
@@ -35,13 +75,12 @@ async function maybeSendEmails({ volunteer }) {
   const notifyTo = process.env.VOLUNTEER_NOTIFY_TO;
   const replyTo = process.env.VOLUNTEER_REPLY_TO;
 
-  // If not configured, silently skip
   if (!host || !port || !user || !pass || !from) return;
 
   let nodemailer;
   try {
     nodemailer = await import("nodemailer");
-  } catch (e) {
+  } catch {
     console.warn("Email not sent: nodemailer not installed.");
     return;
   }
@@ -49,7 +88,7 @@ async function maybeSendEmails({ volunteer }) {
   const transporter = nodemailer.createTransport({
     host,
     port: Number(port),
-    secure: Number(port) === 465, // common convention
+    secure: Number(port) === 465,
     auth: { user, pass },
   });
 
@@ -60,11 +99,13 @@ async function maybeSendEmails({ volunteer }) {
     `Email: ${volunteer.email}`,
     `Phone: ${volunteer.phone || "-"}`,
     `Role interest: ${volunteer.roleInterest}`,
-    `Weekly hours: ${volunteer.weeklyHours}`,
-    `Uyghur proficiency: ${volunteer.uyghurProficiency}`,
+    `Weekly hours: ${labelWeeklyHours(volunteer.weeklyHours)}`,
+    `Uyghur proficiency: ${labelUyghur(volunteer.uyghurProficiency)}`,
     `Start date: ${volunteer.startDate ? new Date(volunteer.startDate).toISOString().slice(0, 10) : "-"}`,
     `Subjects: ${volunteer.subjects}`,
-    `Availability: ${volunteer.availability}`,
+    `Timezone: ${volunteer.timezone || "-"}`,
+    `Preferred time: ${labelPreferredTime(volunteer.preferredTimeOfDay)}`,
+    `Availability details: ${volunteer.availabilityDetails || "-"}`,
     ``,
     `Motivation:`,
     `${volunteer.motivation}`,
@@ -73,7 +114,6 @@ async function maybeSendEmails({ volunteer }) {
     `${volunteer.notes || "-"}`,
   ].join("\n");
 
-  // 1) Notify admin inbox (if configured)
   if (notifyTo) {
     try {
       await transporter.sendMail({
@@ -88,7 +128,6 @@ async function maybeSendEmails({ volunteer }) {
     }
   }
 
-  // 2) Confirmation email to volunteer
   try {
     await transporter.sendMail({
       from,
@@ -120,7 +159,9 @@ router.post("/apply", async (req, res, next) => {
       "uyghurProficiency",
       "startDate",
       "subjects",
-      "availability",
+      "timezone",
+      "preferredTimeOfDay",
+      "availabilityDetails",
       "motivation",
       "notes",
       "website", // honeypot
@@ -128,21 +169,26 @@ router.post("/apply", async (req, res, next) => {
 
     const body = validateInput(req.body || {}, allowedFields);
 
-    // Honeypot: real users won't fill this. Bots often will.
+    // Honeypot: bots often fill it; real users won't.
     const website = (body.website || "").trim();
-    if (website) {
-      // Return success to avoid signaling to bots that they were detected.
-      return res.status(201).json({ success: true });
-    }
+    if (website) return res.status(201).json({ success: true });
 
     const name = (body.name || "").trim();
     const email = (body.email || "").trim().toLowerCase();
     const phone = (body.phone || "").trim();
-    const roleInterest = (body.roleInterest || "").toLowerCase();
-    const weeklyHours = (body.weeklyHours || "").toLowerCase();
-    const uyghurProficiency = (body.uyghurProficiency || "").toLowerCase();
+
+    const roleInterest = String(body.roleInterest || "").trim().toLowerCase();
+    const weeklyHours = String(body.weeklyHours || "").trim().toLowerCase();
+    const uyghurProficiency = String(body.uyghurProficiency || "").trim().toLowerCase();
+
     const subjects = (body.subjects || "").trim();
-    const availability = (body.availability || "").trim();
+
+    // Normalize timezone casing so "utc-05:00" becomes "UTC-05:00"
+    const timezone = String(body.timezone || "").trim().toUpperCase();
+
+    const preferredTimeOfDay = String(body.preferredTimeOfDay || "").trim().toLowerCase();
+    const availabilityDetails = (body.availabilityDetails || "").trim();
+
     const motivation = (body.motivation || "").trim();
     const notes = (body.notes || "").trim();
 
@@ -155,22 +201,21 @@ router.post("/apply", async (req, res, next) => {
     if (!email) fieldErrors.email = "Email is required.";
     else if (!EMAIL_RE.test(email)) fieldErrors.email = "Invalid email format.";
 
-    if (!ROLE_INTEREST.has(roleInterest))
-      fieldErrors.roleInterest = "Invalid selection.";
+    if (!ROLE_INTEREST.has(roleInterest)) fieldErrors.roleInterest = "Invalid selection.";
+    if (!WEEKLY_HOURS.has(weeklyHours)) fieldErrors.weeklyHours = "Invalid selection.";
+    if (!UYGHUR.has(uyghurProficiency)) fieldErrors.uyghurProficiency = "Invalid selection.";
 
-    if (!WEEKLY_HOURS.has(weeklyHours))
-      fieldErrors.weeklyHours = "Invalid selection.";
-
-    if (!UYGHUR.has(uyghurProficiency))
-      fieldErrors.uyghurProficiency = "Invalid selection.";
-
-    if (!startDateRaw)
-      fieldErrors.startDate = "Start date is required.";
-    else if (Number.isNaN(startDate?.getTime()))
-      fieldErrors.startDate = "Invalid start date.";
+    if (!startDateRaw) fieldErrors.startDate = "Start date is required.";
+    else if (Number.isNaN(startDate?.getTime())) fieldErrors.startDate = "Invalid start date.";
 
     if (!subjects) fieldErrors.subjects = "Subjects are required.";
-    if (!availability) fieldErrors.availability = "Availability is required.";
+
+    if (!timezone) fieldErrors.timezone = "Timezone is required.";
+    else if (!TIMEZONE_RE.test(timezone)) fieldErrors.timezone = "Invalid timezone format.";
+
+    if (!PREF_TIME.has(preferredTimeOfDay)) fieldErrors.preferredTimeOfDay = "Invalid selection.";
+    if (!availabilityDetails) fieldErrors.availabilityDetails = "Availability is required.";
+
     if (!motivation) fieldErrors.motivation = "Motivation is required.";
 
     if (Object.keys(fieldErrors).length > 0) {
@@ -190,13 +235,13 @@ router.post("/apply", async (req, res, next) => {
       uyghurProficiency,
       startDate,
       subjects,
-      availability,
+      timezone,
+      preferredTimeOfDay,
+      availabilityDetails,
       motivation,
       notes: notes || undefined,
-      // status defaults to pending
     });
 
-    // Email is best-effort; never block success on SMTP issues.
     void maybeSendEmails({ volunteer: created.toObject() });
 
     res.status(201).json({ success: true });
@@ -225,7 +270,10 @@ router.get("/all", requireAuth, requireAdminOrInstructor, async (req, res, next)
       filter.$or = [
         { name: rx },
         { email: rx },
+        { phone: rx },
         { subjects: rx },
+        { timezone: rx },
+        { availabilityDetails: rx },
       ];
     }
 
@@ -234,7 +282,9 @@ router.get("/all", requireAuth, requireAdminOrInstructor, async (req, res, next)
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit)
-        .select("name email phone roleInterest weeklyHours uyghurProficiency startDate subjects availability motivation notes status createdAt")
+        .select(
+          "name email phone roleInterest weeklyHours uyghurProficiency startDate subjects timezone preferredTimeOfDay availabilityDetails motivation notes status createdAt"
+        )
         .lean(),
       Volunteer.countDocuments(filter),
     ]);
@@ -265,11 +315,7 @@ router.patch("/:id/status", requireAuth, requireAdminOrInstructor, async (req, r
       });
     }
 
-    const updated = await Volunteer.findByIdAndUpdate(
-      id,
-      { $set: { status: nextStatus } },
-      { new: true }
-    )
+    const updated = await Volunteer.findByIdAndUpdate(id, { $set: { status: nextStatus } }, { new: true })
       .select("status")
       .lean();
 
@@ -301,12 +347,21 @@ router.get("/export.csv", requireAuth, requireAdminOrInstructor, async (req, res
 
     if (q) {
       const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      filter.$or = [{ name: rx }, { email: rx }, { subjects: rx }];
+      filter.$or = [
+        { name: rx },
+        { email: rx },
+        { phone: rx },
+        { subjects: rx },
+        { timezone: rx },
+        { availabilityDetails: rx },
+      ];
     }
 
     const rows = await Volunteer.find(filter)
       .sort({ createdAt: -1 })
-      .select("name email phone roleInterest weeklyHours uyghurProficiency startDate subjects availability motivation notes status createdAt")
+      .select(
+        "name email phone roleInterest weeklyHours uyghurProficiency startDate subjects timezone preferredTimeOfDay availabilityDetails motivation notes status createdAt"
+      )
       .lean();
 
     const headers = [
@@ -320,7 +375,9 @@ router.get("/export.csv", requireAuth, requireAdminOrInstructor, async (req, res
       "uyghurProficiency",
       "startDate",
       "subjects",
-      "availability",
+      "timezone",
+      "preferredTimeOfDay",
+      "availabilityDetails",
       "motivation",
       "notes",
     ];
@@ -335,14 +392,18 @@ router.get("/export.csv", requireAuth, requireAdminOrInstructor, async (req, res
           r.email || "",
           r.phone || "",
           r.roleInterest || "",
-          r.weeklyHours || "",
-          r.uyghurProficiency || "",
+          labelWeeklyHours(r.weeklyHours),
+          labelUyghur(r.uyghurProficiency),
           r.startDate ? new Date(r.startDate).toISOString().slice(0, 10) : "",
           r.subjects || "",
-          r.availability || "",
+          r.timezone || "",
+          labelPreferredTime(r.preferredTimeOfDay),
+          r.availabilityDetails || "",
           r.motivation || "",
           r.notes || "",
-        ].map(csvEscape).join(",")
+        ]
+          .map(csvEscape)
+          .join(",")
       ),
     ].join("\n");
 

@@ -1,9 +1,13 @@
 // api/index.js
 // Express entrypoint for the API.
-// Goals:
-//  - Serverless-safe on Vercel (no unconditional app.listen())
-//  - Reuse a single Mongoose connection per instance (dbConnect() is memoized)
-//  - Keep endpoints and routers exactly as before
+// - Applies security headers, CORS, sanitization, and rate limiting.
+// - Ensures a memoized MongoDB connection before routing.
+// - Mounts feature routers and keeps a few legacy endpoints.
+//
+// Notes:
+// - app.set("trust proxy", 1) is required so rate limiting uses the real client IP behind proxies.
+// - If ALLOWED_ORIGINS is not set, CORS will allow requests (prevents accidental self-blocking).
+//   If ALLOWED_ORIGINS is set, only those origins will be allowed.
 
 import "dotenv/config";
 import express from "express";
@@ -26,7 +30,7 @@ import levelRoutes from "../server/routes/level-routes.js";
 import classRoutes from "../server/routes/class-routes.js";
 import volunteerRoutes from "../server/routes/volunteer-routes.js";
 
-// Memoized DB connection (must export a function that reuses an existing conn)
+// Memoized DB connection (reuses an existing conn per instance)
 import { dbConnect } from "../server/db.js";
 
 // Security middleware (Helmet + CSP), centralized in /middleware
@@ -46,8 +50,7 @@ app.set("trust proxy", 1);
 // Security headers (CSP, HSTS, etc.)
 app.use(security);
 
-// CORS: allow same-origin and an allowlist from env
-// Set ALLOWED_ORIGINS as a comma-separated list in Vercel project settings if needed.
+// CORS: allow requests when no allowlist is configured; otherwise enforce allowlist.
 const allowlist = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
@@ -56,19 +59,18 @@ const allowlist = (process.env.ALLOWED_ORIGINS || "")
 app.use(
   cors({
     origin: (origin, cb) => {
-      // Allow same-origin (no Origin header) & explicit allowlist
-      if (!origin || allowlist.includes(origin)) return cb(null, true);
+      // Allow non-browser requests (no Origin header)
+      if (!origin) return cb(null, true);
+
+      // If no allowlist is configured, avoid accidentally blocking your own frontend.
+      if (allowlist.length === 0) return cb(null, true);
+
+      if (allowlist.includes(origin)) return cb(null, true);
       return cb(new Error("Not allowed by CORS"), false);
     },
     credentials: false,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Origin",
-      "Accept",
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With"
-    ],
+    allowedHeaders: ["Origin", "Accept", "Content-Type", "Authorization", "X-Requested-With"],
   })
 );
 
@@ -83,7 +85,7 @@ app.use("/api/sign-up", burstLimiter);
 
 // Ensure DB is connected before any route runs.
 // dbConnect() should be memoized so warm invocations are a fast no-op.
-app.use(async (req, res, next) => {
+app.use(async (_req, res, next) => {
   try {
     await dbConnect();
     next();
@@ -108,7 +110,7 @@ app.use("/api/levels", levelRoutes);
 app.use("/api/classes", classRoutes);
 app.use("/api/volunteer", volunteerRoutes);
 
-// --- Health check (simple visibility for uptime checks) ----------------------
+// --- Health check -------------------------------------------------------------
 app.get("/api/health", (_req, res) => {
   // readyState: 0=disconnected, 1=connected, 2=connecting, 3=disconnecting
   res.json({ ok: true, db: mongoose.connection.readyState });
@@ -119,9 +121,8 @@ app.get("/api/health", (_req, res) => {
 // Get All Classes (with simple filter support)
 app.get("/api/all-classes", async (req, res) => {
   try {
-    if ("level" in req.query) {
-      req.query.level = Number(req.query.level);
-    }
+    if ("level" in req.query) req.query.level = Number(req.query.level);
+
     const allowedFields = ["level", "instructor", "ageGroup"];
     const filters = validateInput(req.query, allowedFields);
 
@@ -187,7 +188,7 @@ app.put("/api/users/:id/unenroll", async (req, res) => {
   }
 });
 
-// Students export (kept as-is functionally)
+// Students export
 app.get("/api/students-export", async (_req, res) => {
   try {
     const students = await User.find({ privilege: "student" });
@@ -238,7 +239,7 @@ app.get("/api/students-export", async (_req, res) => {
             instructor: classInfo.instructor,
             link: classInfo.link,
             scheduleEST,
-            scheduleIstanbul
+            scheduleIstanbul,
           };
         })
         .filter(Boolean);
@@ -254,7 +255,7 @@ app.get("/api/students-export", async (_req, res) => {
           instructor: "",
           link: "",
           scheduleEST: "",
-          scheduleIstanbul: ""
+          scheduleIstanbul: "",
         });
       } else {
         for (const classInfo of enrolled) {
@@ -263,7 +264,7 @@ app.get("/api/students-export", async (_req, res) => {
             lastName: student.lastName,
             email: student.email,
             creationDate: student.creationDate.toISOString().split("T")[0],
-            ...classInfo
+            ...classInfo,
           });
         }
       }

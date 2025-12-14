@@ -1,3 +1,15 @@
+// src/pages/dashboards/admin/AdminVolunteers.jsx
+// Admin Volunteers dashboard.
+// Features:
+// - Auth-gated (admins only)
+// - Search, status filter, pagination
+// - Status updates (optimistic UI)
+// - CSV export
+//
+// Notes:
+// - Display labels are mapped for enum-like fields (weeklyHours, uyghurProficiency, preferredTimeOfDay)
+//   so the UI stays human-friendly even if stored values are compact.
+
 import { useContext, useEffect, useMemo, useState } from "react";
 import { UserContext } from "@/contexts/UserContext.jsx";
 import { useLocation } from "wouter";
@@ -11,7 +23,11 @@ import Skeleton from "react-loading-skeleton";
 import "react-loading-skeleton/dist/skeleton.css";
 import useDelayedSkeleton from "@/hooks/useDelayedSkeleton";
 
-import { downloadVolunteersCsv, getVolunteers, updateVolunteerStatus } from "@/wrappers/volunteer-wrapper.js";
+import {
+  downloadVolunteersCsv,
+  getVolunteers,
+  updateVolunteerStatus,
+} from "@/wrappers/volunteer-wrapper.js";
 
 const PAGE_SIZE = 50;
 
@@ -21,6 +37,42 @@ const STATUS_OPTIONS = [
   { value: "approved", label: "Approved" },
   { value: "rejected", label: "Rejected" },
 ];
+
+// Value -> label maps (keep these aligned with server/schema enums)
+const WEEKLY_HOURS_LABEL = {
+  lt1: "Less than 1 hr/week",
+  "1_2": "1–2 hrs/week",
+  "3_5": "3–5 hrs/week",
+  "6_plus": "6+ hrs/week",
+};
+
+const UYGHUR_LABEL = {
+  fluent_native: "Fluent / Native",
+  professional: "Professional working proficiency",
+  conversational: "Conversational",
+  none: "Not proficient",
+};
+
+const PREF_TIME_LABEL = {
+  morning: "Morning",
+  afternoon: "Afternoon",
+  evening: "Evening",
+  flexible: "Flexible",
+};
+
+function formatDateISO(d) {
+  if (!d) return "";
+  try {
+    return new Date(d).toISOString().slice(0, 10);
+  } catch {
+    return "";
+  }
+}
+
+function labelOrDash(map, value) {
+  if (!value) return "—";
+  return map[value] || value; // fallback shows raw value if new enum appears
+}
 
 const AdminVolunteers = () => {
   const { user } = useContext(UserContext);
@@ -41,11 +93,13 @@ const AdminVolunteers = () => {
 
   const headerCount = useMemo(() => `${total} volunteer(s)`, [total]);
 
+  // Debounce search input for better UX & fewer requests
   useEffect(() => {
     const id = setTimeout(() => setDebouncedSearch(searchInput), 350);
     return () => clearTimeout(id);
   }, [searchInput]);
 
+  // Initial auth gate + first page load
   useEffect(() => {
     if (!isLoaded) return;
 
@@ -68,6 +122,7 @@ const AdminVolunteers = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoaded, isSignedIn, user?._id]);
 
+  // Reload when filters change
   useEffect(() => {
     if (!allowRender) return;
     setPage(1);
@@ -115,7 +170,7 @@ const AdminVolunteers = () => {
   };
 
   const handleStatusChange = async (id, newStatus) => {
-    // optimistic update
+    // Optimistic update
     const prev = items;
     setItems((curr) => curr.map((v) => (v._id === id ? { ...v, status: newStatus } : v)));
 
@@ -123,7 +178,7 @@ const AdminVolunteers = () => {
       await updateVolunteerStatus(id, newStatus);
     } catch (err) {
       console.error("Status update failed:", err);
-      // revert on failure
+      // Revert on failure
       setItems(prev);
     }
   };
@@ -184,6 +239,8 @@ const AdminVolunteers = () => {
               <th className="text-left px-4 py-3">Role</th>
               <th className="text-left px-4 py-3">Hours</th>
               <th className="text-left px-4 py-3">Uyghur</th>
+              <th className="text-left px-4 py-3">Preferred time</th>
+              <th className="text-left px-4 py-3">Timezone</th>
               <th className="text-left px-4 py-3">Start</th>
               <th className="text-left px-4 py-3">Status</th>
               <th className="text-left px-4 py-3">Created</th>
@@ -197,8 +254,10 @@ const AdminVolunteers = () => {
                   <td className="px-4 py-3"><Skeleton /></td>
                   <td className="px-4 py-3"><Skeleton /></td>
                   <td className="px-4 py-3"><Skeleton width={80} /></td>
-                  <td className="px-4 py-3"><Skeleton width={60} /></td>
-                  <td className="px-4 py-3"><Skeleton width={80} /></td>
+                  <td className="px-4 py-3"><Skeleton width={90} /></td>
+                  <td className="px-4 py-3"><Skeleton width={140} /></td>
+                  <td className="px-4 py-3"><Skeleton width={110} /></td>
+                  <td className="px-4 py-3"><Skeleton width={90} /></td>
                   <td className="px-4 py-3"><Skeleton width={90} /></td>
                   <td className="px-4 py-3"><Skeleton width={110} /></td>
                   <td className="px-4 py-3"><Skeleton width={110} /></td>
@@ -206,21 +265,21 @@ const AdminVolunteers = () => {
               ))
             ) : items.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-gray-500" colSpan={8}>
+                <td className="px-4 py-8 text-gray-500" colSpan={10}>
                   No volunteers found.
                 </td>
               </tr>
             ) : (
               items.map((v) => (
-                <tr key={v._id} className="text-gray-800">
+                <tr key={v._id} className="text-gray-800 align-top">
                   <td className="px-4 py-3">{v.name}</td>
                   <td className="px-4 py-3">{v.email}</td>
-                  <td className="px-4 py-3">{v.roleInterest}</td>
-                  <td className="px-4 py-3">{v.weeklyHours}</td>
-                  <td className="px-4 py-3">{v.uyghurProficiency}</td>
-                  <td className="px-4 py-3">
-                    {v.startDate ? new Date(v.startDate).toISOString().slice(0, 10) : ""}
-                  </td>
+                  <td className="px-4 py-3">{v.roleInterest || "—"}</td>
+                  <td className="px-4 py-3">{labelOrDash(WEEKLY_HOURS_LABEL, v.weeklyHours)}</td>
+                  <td className="px-4 py-3">{labelOrDash(UYGHUR_LABEL, v.uyghurProficiency)}</td>
+                  <td className="px-4 py-3">{labelOrDash(PREF_TIME_LABEL, v.preferredTimeOfDay)}</td>
+                  <td className="px-4 py-3">{v.timezone || "—"}</td>
+                  <td className="px-4 py-3">{formatDateISO(v.startDate)}</td>
                   <td className="px-4 py-3">
                     <select
                       className="border border-gray-300 rounded-sm px-2 py-1"
@@ -233,9 +292,7 @@ const AdminVolunteers = () => {
                       <option value="rejected">rejected</option>
                     </select>
                   </td>
-                  <td className="px-4 py-3">
-                    {v.createdAt ? new Date(v.createdAt).toISOString().slice(0, 10) : ""}
-                  </td>
+                  <td className="px-4 py-3">{formatDateISO(v.createdAt)}</td>
                 </tr>
               ))
             )}

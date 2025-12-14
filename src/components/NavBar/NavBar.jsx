@@ -1,3 +1,9 @@
+// src/components/NavBar.jsx
+// Top navigation (desktop + mobile).
+// - Role-aware links (admin vs public)
+// - Mobile menu toggle + click-outside close
+// - Clerk sign-out rendered as an explicit <button> for reliable styling
+
 import { useContext, useRef, useState, useEffect } from 'react';
 import { Link } from 'wouter';
 import dillarLogo from '/dillar_logo.png';
@@ -34,7 +40,7 @@ const NavBar = () => {
   return (
     <div>
       <nav className="w-full fixed top-0 bg-white h-20 shadow-md z-[1000]">
-        <div className='flex justify-between items-center px-8 h-full'>
+        <div className="flex justify-between items-center px-8 h-full">
           <Link href="/" className="flex-shrink-0 flex items-center">
             <img className="h-14 w-auto" src={dillarLogo} alt="Dillar Academy" />
           </Link>
@@ -65,32 +71,38 @@ const NavBar = () => {
             )}
           </div>
 
-          <div className='hidden lg:flex lg:items-center'>
+          <div className="hidden lg:flex lg:items-center">
             <SignedIn>
-              <SignOutButton className="hover:text-neutral-300 px-3 py-2">
-                {t("sign_out")}
+              <SignOutButton>
+                <button type="button" className="hover:text-neutral-300 px-3 py-2">
+                  {t("sign_out")}
+                </button>
               </SignOutButton>
             </SignedIn>
             <LanguageDropdown />
           </div>
 
           <button
-            onClick={() => setIsMenuOpen(!isMenuOpen)}
-            className="lg:hidden inline-flex items-center justify-center p-2 
-            rounded-md text-gray-400 hover:text-gray-500 hover:bg-gray-100 
-            focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500"
+            type="button"
+            onClick={() => setIsMenuOpen((v) => !v)}
+            className="lg:hidden inline-flex items-center justify-center p-2
+              rounded-md text-gray-400 hover:text-gray-500 hover:bg-gray-100
+              focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500"
             ref={menuButtonRef}
             aria-expanded={isMenuOpen}
             aria-controls="mobile-menu"
           >
             <span className="sr-only">Open main menu</span>
-            <IoMenuOutline size={32} color='black' />
+            <IoMenuOutline size={32} color="black" />
           </button>
         </div>
 
         <div
+          id="mobile-menu"
           ref={mobileMenuRef}
-          className={`lg:hidden flex flex-col items-center w-full pb-4 shadow-md bg-white ${isMenuOpen ? 'block' : 'hidden'}`}
+          className={`lg:hidden flex-col items-center w-full pb-4 shadow-md bg-white ${
+            isMenuOpen ? 'flex' : 'hidden'
+          }`}
         >
           {user?.privilege === "admin" ? (
             <>
@@ -100,7 +112,19 @@ const NavBar = () => {
               <NavLink href="/admin/volunteers" isMobile={true} onClick={closeMenu}>Volunteers</NavLink>
               <NavLink href="/admin/schedule" isMobile={true} onClick={closeMenu}>Schedule</NavLink>
               <NavLink href="/admin/translations" isMobile={true} onClick={closeMenu}>Translations</NavLink>
-              <SignOutButton className="py-2 px-3" />
+
+              <SignedIn>
+                <SignOutButton>
+                  <button
+                    type="button"
+                    onClick={closeMenu}
+                    className="w-full text-left py-2 px-3 hover:bg-gray-50"
+                  >
+                    {t("sign_out")}
+                  </button>
+                </SignOutButton>
+              </SignedIn>
+
               <div className="w-full h-2 mt-2 mx-3 border-t border-gray-200"></div>
               <LanguageDropdown />
             </>
@@ -110,13 +134,24 @@ const NavBar = () => {
               <NavLink href="/volunteer" isMobile={true} onClick={closeMenu}>Volunteer</NavLink>
               <NavLink href="/contact" isMobile={true} onClick={closeMenu}>{t("contact")}</NavLink>
               <NavLink href="/about" isMobile={true} onClick={closeMenu}>{t("about")}</NavLink>
+
               <SignedOut>
                 <NavLink href="/login" isMobile={true} onClick={closeMenu}>{t("login")}</NavLink>
               </SignedOut>
+
               <SignedIn>
                 <NavLink href={`/${user?.privilege}`} onClick={closeMenu}>{t("dashboard")}</NavLink>
-                <SignOutButton className="py-2 px-3" />
+                <SignOutButton>
+                  <button
+                    type="button"
+                    onClick={closeMenu}
+                    className="w-full text-left py-2 px-3 hover:bg-gray-50"
+                  >
+                    {t("sign_out")}
+                  </button>
+                </SignOutButton>
               </SignedIn>
+
               <div className="w-full h-2 mt-2 mx-3 border-t border-gray-200"></div>
               <LanguageDropdown />
             </>

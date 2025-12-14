@@ -1,7 +1,17 @@
 // server/schemas/Volunteer.js
+// Volunteer application schema (MongoDB / Mongoose).
+// Stores a single volunteer interest submission and its review status.
+//
+// Notes:
+// - Uses compact enum values for consistency across UI + API.
+// - `timezone` is validated as a strict UTC offset string (e.g., "UTC-05:00").
+// - `timestamps` adds createdAt/updatedAt automatically.
+
 import mongoose from "mongoose";
 
 const { Schema } = mongoose;
+
+const TIMEZONE_RE = /^UTC[+-]\d{2}:\d{2}$/;
 
 const VolunteerSchema = new Schema(
   {
@@ -35,14 +45,14 @@ const VolunteerSchema = new Schema(
 
     weeklyHours: {
       type: String,
-      enum: ["1", "2", "more"],
+      enum: ["lt1", "1_2", "3_5", "6_plus"],
       required: true,
       index: true,
     },
 
     uyghurProficiency: {
       type: String,
-      enum: ["fluent", "somewhat", "no"],
+      enum: ["fluent_native", "professional", "conversational", "none"],
       required: true,
       index: true,
     },
@@ -59,7 +69,22 @@ const VolunteerSchema = new Schema(
       maxlength: 500,
     },
 
-    availability: {
+    timezone: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 16,
+      match: [TIMEZONE_RE, 'Timezone must match format "UTC±HH:MM" (e.g., "UTC-05:00").'],
+    },
+
+    preferredTimeOfDay: {
+      type: String,
+      enum: ["morning", "afternoon", "evening", "flexible"],
+      required: true,
+      index: true,
+    },
+
+    availabilityDetails: {
       type: String,
       required: true,
       trim: true,
@@ -86,15 +111,12 @@ const VolunteerSchema = new Schema(
       index: true,
     },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
 
 VolunteerSchema.index({ createdAt: -1 });
 
 const Volunteer =
-  mongoose.models.Volunteer ||
-  mongoose.model("Volunteer", VolunteerSchema);
+  mongoose.models.Volunteer || mongoose.model("Volunteer", VolunteerSchema);
 
 export default Volunteer;
