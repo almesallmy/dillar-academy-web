@@ -1,4 +1,4 @@
-// api/middleware/auth.js
+// server/middleware/auth.js
 // Centralized authentication & authorization for Express routes.
 //
 // Exports:

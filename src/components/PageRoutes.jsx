@@ -2,6 +2,7 @@ import { Route, Switch } from "wouter";
 import Home from '@/pages/Home';
 import About from '@/pages/About';
 import Contact from '@/pages/Contact';
+import Volunteer from "@/pages/Volunteer";
 import SignUp from '@/pages/onboarding/SignUp';
 import Login from '@/pages/onboarding/Login';
 import ClassesPage from '@/pages/ClassesPage';
@@ -16,6 +17,7 @@ import AdminIelts from '@/pages/dashboards/admin/AdminIelts';
 import AdminStudents from '@/pages/dashboards/admin/AdminStudents';
 import AdminInstructors from '@/pages/dashboards/admin/AdminInstructors';
 import AdminSchedule from '@/pages/dashboards/admin/AdminSchedule';
+import AdminVolunteers from "@/pages/dashboards/admin/AdminVolunteers";
 import EditLevel from '@/pages/dashboards/admin/editPages/EditLevel';
 import AddLevel from '@/pages/dashboards/admin/editPages/AddLevel';
 import EditClass from '@/pages/dashboards/admin/editPages/EditClass';
@@ -38,6 +40,7 @@ export default function PageRoutes() {
       <Route path="/" component={Home} />
       <Route path="/about" component={About} />
       <Route path="/contact" component={Contact} />
+      <Route path="/volunteer" component={Volunteer} />
       <Route path="/signup" component={SignUp} />
       <Route path="/login" component={Login} />
       <Route path="/levels" component={LevelsPage} />
@@ -46,6 +49,7 @@ export default function PageRoutes() {
       <Route path="/reset-password-code" component={ResetPasswordCode} />
       <Route path="/reset-password" component={ResetPassword} />
       <Route path="/student" component={StudentPortal} />
+
       <Route path="/admin/levels" component={AdminLevels} />
       <Route path="/admin/levels/conversations" component={AdminConversations} />
       <Route path="/admin/levels/conversations/new" component={AddConversation} />
@@ -59,9 +63,11 @@ export default function PageRoutes() {
       <Route path="/admin/levels/class/:classId" component={EditClass} />
       <Route path="/admin/students" component={AdminStudents} />
       <Route path="/admin/instructors" component={AdminInstructors} />
+      <Route path="/admin/volunteers" component={AdminVolunteers} />
       <Route path="/admin/user/:id" component={EditUser} />
       <Route path="/admin/schedule" component={AdminSchedule} />
       <Route path="/admin/translations" component={AdminTranslations} />
+
       <Route path="/instructor" component={InstructorView} />
       <Route path="/style" component={StyleGuide} />
       <Route path="/instructor/class/:id" component={InstructorEditClass} />

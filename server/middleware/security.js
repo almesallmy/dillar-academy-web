@@ -1,4 +1,4 @@
-// api/middleware/security.js
+// server/middleware/security.js
 // Centralized security headers (Helmet + strict CSP) for API routes.
 // Allows Clerk, Google Fonts, Cloudflare Turnstile (Smart CAPTCHA), and flag SVGs.
 

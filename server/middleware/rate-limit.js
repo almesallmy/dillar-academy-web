@@ -1,4 +1,4 @@
-// api/middleware/rate-limit.js
+// server/middleware/rate-limit.js
 // Centralized rate-limiting for API routes.
 // - apiLimiter: general throttle for all /api traffic
 // - burstLimiter: stricter throttle for sensitive endpoints

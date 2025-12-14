@@ -24,6 +24,7 @@ import emailRoutes from "../server/routes/email-routes.js";
 import userRoutes from "../server/routes/user-routes.js";
 import levelRoutes from "../server/routes/level-routes.js";
 import classRoutes from "../server/routes/class-routes.js";
+import volunteerRoutes from "../server/routes/volunteer-routes.js";
 
 // Memoized DB connection (must export a function that reuses an existing conn)
 import { dbConnect } from "../server/db.js";
@@ -105,6 +106,7 @@ app.use("/api", emailRoutes);
 app.use("/api", userRoutes);
 app.use("/api/levels", levelRoutes);
 app.use("/api/classes", classRoutes);
+app.use("/api/volunteer", volunteerRoutes);
 
 // --- Health check (simple visibility for uptime checks) ----------------------
 app.get("/api/health", (_req, res) => {
