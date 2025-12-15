@@ -1,3 +1,13 @@
+/**
+ * src/components/PageRoutes.jsx
+ *
+ * Central client-side route table (wouter).
+ * - Public pages
+ * - Auth/onboarding pages
+ * - Role-specific dashboards
+ * - Donation routes (donate UI is live; payment actions are disabled until providers are configured)
+ */
+
 import { Route, Switch } from "wouter";
 import Home from '@/pages/Home';
 import About from '@/pages/About';
@@ -31,6 +41,11 @@ import InstructorView from '@/pages/dashboards/InstructorView';
 import AdminTranslations from '@/pages/dashboards/admin/AdminTranslations';
 import PageNotFound from '@/pages/PageNotFound';
 import StyleGuide from "@/pages/StyleGuide";
+
+// Donation pages
+import Donate from '@/pages/Donate';
+import DonateThankYou from '@/pages/DonateThankYou';
+
 // TODO
 import InstructorEditClass from '@/pages/dashboards/InstructorEditClass';
 
@@ -49,6 +64,10 @@ export default function PageRoutes() {
       <Route path="/reset-password-code" component={ResetPasswordCode} />
       <Route path="/reset-password" component={ResetPassword} />
       <Route path="/student" component={StudentPortal} />
+
+      {/* Donation routes */}
+      <Route path="/donate" component={Donate} />
+      <Route path="/donate/thank-you" component={DonateThankYou} />
 
       <Route path="/admin/levels" component={AdminLevels} />
       <Route path="/admin/levels/conversations" component={AdminConversations} />

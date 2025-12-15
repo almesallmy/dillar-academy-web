@@ -1,8 +1,12 @@
-// src/components/NavBar.jsx
-// Top navigation (desktop + mobile).
-// - Role-aware links (admin vs public)
-// - Mobile menu toggle + click-outside close
-// - Clerk sign-out rendered as an explicit <button> for reliable styling
+/**
+ * src/components/NavBar.jsx
+ *
+ * Top navigation (desktop + mobile).
+ * - Role-aware links (admin vs public)
+ * - Mobile menu toggle + click-outside close
+ * - Clerk sign-out rendered as an explicit <button> for reliable styling
+ * - Prominent "Donate" button (desktop + mobile)
+ */
 
 import { useContext, useRef, useState, useEffect } from 'react';
 import { Link } from 'wouter';
@@ -71,7 +75,16 @@ const NavBar = () => {
             )}
           </div>
 
-          <div className="hidden lg:flex lg:items-center">
+          <div className="hidden lg:flex lg:items-center lg:gap-2">
+            {/* Donate button (desktop) */}
+            <Link
+              href="/donate"
+              className="inline-flex items-center rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm
+                hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500"
+            >
+              Donate
+            </Link>
+
             <SignedIn>
               <SignOutButton>
                 <button type="button" className="hover:text-neutral-300 px-3 py-2">
@@ -104,6 +117,20 @@ const NavBar = () => {
             isMenuOpen ? 'flex' : 'hidden'
           }`}
         >
+          {/* Donate button (mobile) */}
+          <Link
+            href="/donate"
+            onClick={closeMenu}
+            className="w-full px-3 pt-3"
+          >
+            <span
+              className="block w-full rounded-md bg-indigo-600 px-4 py-2 text-center text-sm font-semibold text-white
+                shadow-sm hover:bg-indigo-500"
+            >
+              Donate
+            </span>
+          </Link>
+
           {user?.privilege === "admin" ? (
             <>
               <NavLink href="/admin/levels" isMobile={true} onClick={closeMenu}>Classes</NavLink>
