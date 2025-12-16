@@ -1,5 +1,22 @@
-// api/routes/user-routes.js
-// Purpose: User CRUD + admin/student listing, with Clerk auth and least-privilege data exposure.
+/**
+ * server/routes/user-routes.js
+ *
+ * User-related API routes.
+ * Mounted at `/api` in `api/index.js`.
+ *
+ * Includes:
+ * - POST /sign-up
+ * - GET /users
+ * - GET /user
+ * - PUT /user/:id
+ * - DELETE /user/:id
+ * - GET /students-classes/:id
+ * - GET /students-with-classes
+ *
+ * Auth:
+ * - Uses Clerk-backed middleware for authentication/authorization.
+ * - User-specific responses are marked as non-cacheable.
+ */
 
 import "dotenv/config";
 import express from "express";
@@ -11,6 +28,12 @@ import { validateInput } from "../../src/utils/backend/validate-utils.js";
 import { requireAuth, requireAdminOrInstructor } from "../../server/middleware/auth.js";
 
 const router = express.Router();
+
+// Prevent caching of user-specific responses
+router.use((_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
 
 /* -----------------------------
    Helpers
@@ -109,10 +132,7 @@ router.get("/users", requireAuth, requireAdminOrInstructor, async (req, res) => 
       return res.status(200).json({ items, total, page, limit: cappedLimit });
     }
 
-    const users = await User.find(filter)
-      .select(projection)
-      .sort({ lastName: 1, firstName: 1 })
-      .lean();
+    const users = await User.find(filter).select(projection).sort({ lastName: 1, firstName: 1 }).lean();
     res.status(200).json(users);
   } catch (err) {
     console.error("Get users error:", err);
@@ -229,10 +249,7 @@ router.get("/students-classes/:id", requireAuth, allowSelfOrPriv, async (req, re
       return res.status(400).json({ error: "Invalid ID" });
     }
 
-    const classDetails = await User.findById(id)
-      .select("enrolledClasses")
-      .populate("enrolledClasses")
-      .lean();
+    const classDetails = await User.findById(id).select("enrolledClasses").populate("enrolledClasses").lean();
 
     if (!classDetails) return res.status(404).json({ message: "User not found" });
     res.json(classDetails.enrolledClasses || []);
@@ -255,10 +272,8 @@ router.get("/students-with-classes", requireAuth, requireAdminOrInstructor, asyn
 
     const { level: levelParam, q } = req.query;
 
-    // Build class-based filters first (for level and/or text on class fields)
     const classIdFilters = [];
 
-    // Level filter (number or string: "conversation" | "ielts")
     if (typeof levelParam !== "undefined" && levelParam !== null && `${levelParam}`.trim() !== "") {
       const raw = `${levelParam}`.trim();
       const parsed = Number.isNaN(Number(raw)) ? raw.toLowerCase() : Number(raw);
@@ -270,20 +285,16 @@ router.get("/students-with-classes", requireAuth, requireAdminOrInstructor, asyn
       classIdFilters.push({ enrolledClasses: { $in: ids } });
     }
 
-    // Optional q: match user name/email OR class instructor/ageGroup
     const userOr = [];
     if (typeof q === "string" && q.trim()) {
       const rx = new RegExp(escapeRx(q.trim()), "i");
       userOr.push({ firstName: rx }, { lastName: rx }, { email: rx });
 
-      const qClasses = await Class.find({ $or: [{ instructor: rx }, { ageGroup: rx }] })
-        .select("_id")
-        .lean();
+      const qClasses = await Class.find({ $or: [{ instructor: rx }, { ageGroup: rx }] }).select("_id").lean();
       const qIds = qClasses.map((c) => c._id);
       if (qIds.length) classIdFilters.push({ enrolledClasses: { $in: qIds } });
     }
 
-    // Final user filter
     const userFilter = { privilege: "student" };
     if (userOr.length || classIdFilters.length) {
       userFilter.$and = [];

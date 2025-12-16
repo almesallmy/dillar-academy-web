@@ -1,26 +1,46 @@
+/**
+ * server/routes/translation-routes.js
+ *
+ * Translation namespace routes.
+ * Mounted at `/api/locales` in `api/index.js`.
+ *
+ * Routes:
+ * - GET  /:lng/:ns            Returns a flat key/value map for the namespace.
+ * - PUT  /:lng/:ns/:key/      Upserts a single translation key/value.
+ * - POST /create              Creates a translation document.
+ * - POST /transfer            Transfers i18nexus translations into MongoDB.
+ *
+ * Caching:
+ * - GET responses are marked cacheable at the CDN/edge to reduce repeated fetch load.
+ */
+
 import express from "express";
 import Translation from "../schemas/Translation.js";
 
 const router = express.Router();
 
 // Get Translation
-router.get('/:lng/:ns', async (req, res) => {
+router.get("/:lng/:ns", async (req, res) => {
   try {
     const { lng, ns } = req.params;
-    const data = await Translation.find({ lng, ns });
 
-    const translations = {}
-    data.forEach(kv => {
+    res.setHeader("Cache-Control", "public, s-maxage=3600, stale-while-revalidate=86400");
+
+    const data = await Translation.find({ lng, ns }).select("key value -_id").lean();
+
+    const translations = {};
+    for (const kv of data) {
       translations[kv.key] = kv.value;
-    });
-    res.json(translations);
+    }
+
+    return res.json(translations);
   } catch (error) {
-    res.status(500).json({ message: "Failed to get translation" })
+    return res.status(500).json({ message: "Failed to get translation" });
   }
-})
+});
 
 // Edit Translation
-router.put('/:lng/:ns/:key/', async (req, res) => {
+router.put("/:lng/:ns/:key/", async (req, res) => {
   const { lng, ns, key } = req.params;
   const { newTranslation } = req.body;
 
@@ -31,13 +51,13 @@ router.put('/:lng/:ns/:key/', async (req, res) => {
       { new: true, upsert: true }
     );
 
-    res.status(200).json({ message: 'Successfully updated translation', translation: updated });
+    return res.status(200).json({ message: "Successfully updated translation", translation: updated });
   } catch (error) {
-    res.status(500).json({ message: "Failed to update translation" });
+    return res.status(500).json({ message: "Failed to update translation" });
   }
-})
+});
 
-router.post('/create', async (req, res) => {
+router.post("/create", async (req, res) => {
   const { lng, ns, key, value } = req.body;
 
   try {
@@ -45,22 +65,25 @@ router.post('/create', async (req, res) => {
       lng,
       ns,
       key,
-      value
-    })
+      value,
+    });
 
     await translation.save();
-    return res.status(201).json({ message: 'Translation created successfully', data: translation })
+    return res.status(201).json({ message: "Translation created successfully", data: translation });
   } catch (error) {
-    res.status(500).json({ message: 'Failed to create translation' });
+    return res.status(500).json({ message: "Failed to create translation" });
   }
-})
+});
 
 // Move all i18nexus translations to MongoDB
-router.post('/transfer', async (req, res) => {
+router.post("/transfer", async (req, res) => {
   try {
-    const response = await fetch(`https://api.i18nexus.com/project_resources/translations.json?api_key=${process.env.I18NEXUS_API_KEY}`)
+    const response = await fetch(
+      `https://api.i18nexus.com/project_resources/translations.json?api_key=${process.env.I18NEXUS_API_KEY}`
+    );
+
     if (!response.ok) {
-      return res.status(response.status).json({ message: 'Failed to fetch translations' });
+      return res.status(response.status).json({ message: "Failed to fetch translations" });
     }
 
     const translations = await response.json();
@@ -73,33 +96,35 @@ router.post('/transfer', async (req, res) => {
             lng,
             ns,
             key,
-            value
+            value,
           });
 
-          // delete translation from i18nexus
-          await fetch(`https://api.i18nexus.com/project_resources/base_strings.json?api_key=${process.env.I18NEXUS_API_KEY}`, {
-            method: "DELETE",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${process.env.I18NEXUS_PAT}`
-            },
-            body: JSON.stringify({
-              "id": {
-                "key": key,
-                "namespace": ns,
-              }
-            })
-          });
+          await fetch(
+            `https://api.i18nexus.com/project_resources/base_strings.json?api_key=${process.env.I18NEXUS_API_KEY}`,
+            {
+              method: "DELETE",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${process.env.I18NEXUS_PAT}`,
+              },
+              body: JSON.stringify({
+                id: {
+                  key,
+                  namespace: ns,
+                },
+              }),
+            }
+          );
         }
       }
     }
 
     await Translation.insertMany(translationsToInsert);
 
-    return res.status(200).json({ message: "Successfully inserted translations" })
+    return res.status(200).json({ message: "Successfully inserted translations" });
   } catch (error) {
-    res.status(500).json({ message: 'Error transferring translations' })
+    return res.status(500).json({ message: "Error transferring translations" });
   }
-})
+});
 
 export default router;

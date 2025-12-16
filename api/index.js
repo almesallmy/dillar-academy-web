@@ -152,8 +152,18 @@ app.use(
 app.use(express.json({ limit: "100kb" }));
 app.use(mongoSanitize());
 
-// Rate limit early (before DB work)
-app.use("/api", apiLimiter);
+// Rate limit early (before DB work). Limit non-idempotent requests only.
+// /api/sign-up is handled by the stricter limiter below.
+app.use("/api", (req, res, next) => {
+  const method = String(req.method || "").toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
+
+  const path = req.path || "";
+  if (path === "/sign-up" || path.startsWith("/sign-up/")) return next();
+
+  return apiLimiter(req, res, next);
+});
+
 // Stricter limiter for sensitive endpoints
 app.use("/api/sign-up", burstLimiter);
 
@@ -274,6 +284,8 @@ app.get("/api/health", (_req, res) => {
 // Get All Classes (with simple filter support)
 app.get("/api/all-classes", async (req, res) => {
   try {
+    res.setHeader("Cache-Control", "public, s-maxage=3600, stale-while-revalidate=86400");
+
     if ("level" in req.query) req.query.level = Number(req.query.level);
 
     const allowedFields = ["level", "instructor", "ageGroup"];

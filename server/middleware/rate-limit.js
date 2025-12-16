@@ -1,11 +1,16 @@
-// server/middleware/rate-limit.js
-// Centralized rate-limiting for API routes.
-// - apiLimiter: general throttle for all /api traffic
-// - burstLimiter: stricter throttle for sensitive endpoints
-//
-// Notes:
-// * app.set("trust proxy", 1) must be enabled in api/index.js so req.ip reflects the real client IP behind proxies.
-// * Tunable via env vars without code changes.
+/**
+ * server/middleware/rate-limit.js
+ *
+ * Centralized rate limiting for API routes.
+ *
+ * Exports:
+ * - apiLimiter: general throttle for non-idempotent API traffic
+ * - burstLimiter: stricter throttle for sensitive endpoints (e.g., sign-up)
+ *
+ * Notes:
+ * - `app.set("trust proxy", 1)` must be enabled in `api/index.js` so `req.ip` reflects the real client IP.
+ * - Limits are tunable via environment variables.
+ */
 
 import rateLimit from "express-rate-limit";
 
@@ -15,10 +20,17 @@ function intFromEnv(key, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function getClientIp(req) {
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length > 0) {
+    return xff.split(",")[0].trim();
+  }
+  return req.ip || "unknown";
+}
+
 function rateLimitHandler(req, res, _next, options) {
-  // Lightweight log for visibility when throttling happens
   console.warn("Rate limit exceeded", {
-    ip: req.ip,
+    ip: getClientIp(req),
     path: req.originalUrl,
     method: req.method,
     windowMs: options.windowMs,
@@ -35,6 +47,7 @@ export const apiLimiter = rateLimit({
   max: intFromEnv("RATE_LIMIT_MAX", 100),
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: getClientIp,
   handler: rateLimitHandler,
 });
 
@@ -43,5 +56,6 @@ export const burstLimiter = rateLimit({
   max: intFromEnv("BURST_LIMIT_MAX", 20),
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: getClientIp,
   handler: rateLimitHandler,
 });
