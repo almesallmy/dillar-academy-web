@@ -2,11 +2,12 @@
  * src/pages/Donate.jsx
  *
  * Donation landing page.
- * - UI is complete (mission, impact, amount selection).
+ * - Stripe stays on hosted Stripe Checkout.
+ * - PayPal is handled with the PayPal JavaScript SDK + server-side order create/capture.
  * - Payment availability is controlled by the backend donation status endpoint.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 
 /* -------------------------------------------------------------------------- */
@@ -25,7 +26,12 @@ const EMPTY_DONATION_STATUS = {
     paypal: false,
     crypto: false,
   },
+  publicConfig: {
+    paypalClientId: "",
+  },
 };
+
+let paypalSdkPromise = null;
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -66,6 +72,63 @@ function isAmountValid(amount) {
   return amount >= MIN_DONATION_USD && amount <= MAX_DONATION_USD;
 }
 
+/**
+ * Load the PayPal JavaScript SDK once.
+ * @param {string} clientId
+ * @returns {Promise<any>}
+ */
+function loadPayPalSdk(clientId) {
+  if (typeof window === "undefined") {
+    return Promise.reject(new Error("PayPal SDK can only load in the browser."));
+  }
+
+  if (!clientId) {
+    return Promise.reject(new Error("Missing PayPal client ID."));
+  }
+
+  if (window.paypal?.Buttons) {
+    return Promise.resolve(window.paypal);
+  }
+
+  if (paypalSdkPromise) {
+    return paypalSdkPromise;
+  }
+
+  paypalSdkPromise = new Promise((resolve, reject) => {
+    const existingScript = document.querySelector('script[data-paypal-sdk="true"]');
+    if (existingScript) {
+      existingScript.remove();
+    }
+
+    const script = document.createElement("script");
+    script.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(
+      clientId
+    )}&currency=USD&intent=capture&components=buttons`;
+    script.async = true;
+    script.dataset.paypalSdk = "true";
+    script.dataset.paypalClientId = clientId;
+
+    script.onload = () => {
+      if (window.paypal?.Buttons) {
+        resolve(window.paypal);
+        return;
+      }
+
+      paypalSdkPromise = null;
+      reject(new Error("PayPal SDK loaded, but buttons are unavailable."));
+    };
+
+    script.onerror = () => {
+      paypalSdkPromise = null;
+      reject(new Error("Failed to load the PayPal SDK."));
+    };
+
+    document.body.appendChild(script);
+  });
+
+  return paypalSdkPromise;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Page                                                                       */
 /* -------------------------------------------------------------------------- */
@@ -75,7 +138,9 @@ export default function Donate() {
   const [customAmountInput, setCustomAmountInput] = useState("");
   const [donationStatus, setDonationStatus] = useState(EMPTY_DONATION_STATUS);
   const [loadingProvider, setLoadingProvider] = useState(null);
+  const [paypalReady, setPaypalReady] = useState(false);
   const [error, setError] = useState("");
+  const paypalButtonRef = useRef(null);
 
   useEffect(() => {
     let isActive = true;
@@ -88,15 +153,7 @@ export default function Donate() {
         if (!isActive) return;
 
         if (!resp.ok) {
-          setDonationStatus({
-            loaded: true,
-            enabled: false,
-            providers: {
-              stripe: false,
-              paypal: false,
-              crypto: false,
-            },
-          });
+          setDonationStatus(EMPTY_DONATION_STATUS);
           return;
         }
 
@@ -108,19 +165,13 @@ export default function Donate() {
             paypal: Boolean(data?.providers?.paypal),
             crypto: Boolean(data?.providers?.crypto),
           },
+          publicConfig: {
+            paypalClientId: String(data?.publicConfig?.paypalClientId || "").trim(),
+          },
         });
       } catch (_err) {
         if (!isActive) return;
-
-        setDonationStatus({
-          loaded: true,
-          enabled: false,
-          providers: {
-            stripe: false,
-            paypal: false,
-            crypto: false,
-          },
-        });
+        setDonationStatus(EMPTY_DONATION_STATUS);
       }
     }
 
@@ -139,12 +190,144 @@ export default function Donate() {
 
   const amountOk = useMemo(() => isAmountValid(amountUsd), [amountUsd]);
   const donateLabel = amountOk ? `$${formatUsd(amountUsd)}` : "";
+  const paypalClientId = donationStatus.publicConfig?.paypalClientId || "";
 
   const availabilityMessage = !donationStatus.loaded
     ? "Checking donation availability..."
     : !donationStatus.enabled
       ? "Online donations are currently unavailable."
       : null;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function bootstrapPayPal() {
+      if (!donationStatus.providers.paypal || !paypalClientId) {
+        setPaypalReady(false);
+        return;
+      }
+
+      try {
+        await loadPayPalSdk(paypalClientId);
+        if (!cancelled) {
+          setPaypalReady(true);
+        }
+      } catch (err) {
+        console.error("Failed to load PayPal SDK:", err);
+        if (!cancelled) {
+          setPaypalReady(false);
+          setError("PayPal is temporarily unavailable.");
+        }
+      }
+    }
+
+    bootstrapPayPal();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [donationStatus.providers.paypal, paypalClientId]);
+
+  useEffect(() => {
+    const container = paypalButtonRef.current;
+
+    if (!container) return;
+    container.innerHTML = "";
+
+    if (!donationStatus.providers.paypal || !paypalReady || !amountOk || !paypalClientId) {
+      return;
+    }
+
+    if (!window.paypal?.Buttons) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const buttons = window.paypal.Buttons({
+      fundingSource: window.paypal.FUNDING.PAYPAL,
+      style: {
+        color: "gold",
+        shape: "rect",
+        label: "paypal",
+        layout: "vertical",
+        height: 50,
+        tagline: false,
+      },
+
+      async createOrder() {
+        setError("");
+        setLoadingProvider("paypal");
+
+        const resp = await fetch("/api/donate/paypal/create-order", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ amount: amountUsd }),
+        });
+
+        const data = await resp.json().catch(() => ({}));
+
+        if (!resp.ok || !data?.orderID) {
+          setLoadingProvider(null);
+          throw new Error(data?.error || "Unable to start PayPal checkout.");
+        }
+
+        return data.orderID;
+      },
+
+      async onApprove(data) {
+        const resp = await fetch("/api/donate/paypal/capture-order", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderID: data.orderID }),
+        });
+
+        const result = await resp.json().catch(() => ({}));
+
+        if (!resp.ok) {
+          setLoadingProvider(null);
+          throw new Error(result?.error || "Unable to complete PayPal donation.");
+        }
+
+        if (result?.status && result.status !== "COMPLETED") {
+          setLoadingProvider(null);
+          throw new Error("PayPal donation is not complete yet.");
+        }
+
+        window.location.assign(
+          `/donate/thank-you?m=paypal&order_id=${encodeURIComponent(data.orderID)}`
+        );
+      },
+
+      onCancel() {
+        setLoadingProvider(null);
+      },
+
+      onError(err) {
+        console.error("PayPal checkout error:", err);
+        setLoadingProvider(null);
+        setError("PayPal checkout failed. Please try again.");
+      },
+    });
+
+    if (!buttons.isEligible()) {
+      setError("PayPal is not available on this device or browser.");
+      return;
+    }
+
+    buttons.render(container).catch((err) => {
+      console.error("PayPal button render failed:", err);
+      if (!cancelled) {
+        setError("PayPal failed to load. Please try again.");
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      container.innerHTML = "";
+      setLoadingProvider((current) => (current === "paypal" ? null : current));
+    };
+  }, [amountOk, amountUsd, donationStatus.providers.paypal, paypalClientId, paypalReady]);
 
   async function startDonation(provider) {
     try {
@@ -188,23 +371,23 @@ export default function Donate() {
   }
 
   return (
-    <main className="w-full max-w-3xl mx-auto px-4 py-10">
-      {/* Header */}
+    <main className="mx-auto w-full max-w-3xl px-4 py-10">
       <header className="mb-6">
         <h1 className="text-3xl font-semibold text-gray-900">Support Dillar Academy</h1>
         <p className="mt-2 text-gray-700">
-          Donations help us expand access to learning, support instructors, and keep classes running for students and families.
+          Donations help us expand access to learning, support instructors, and keep
+          classes running for students and families.
         </p>
       </header>
 
       <section className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-        {/* Amount selection */}
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Choose an amount</h2>
 
           <div className="mt-3 flex flex-wrap items-end gap-3">
             {PRESET_AMOUNTS_USD.map((amt) => {
               const active = customAmountInput.trim() === "" && selectedPreset === amt;
+
               return (
                 <button
                   key={amt}
@@ -214,7 +397,7 @@ export default function Donate() {
                     setSelectedPreset(amt);
                   }}
                   className={[
-                    "rounded-full px-4 py-2 text-sm font-semibold border transition",
+                    "rounded-full border px-4 py-2 text-sm font-semibold transition",
                     active
                       ? "border-indigo-600 bg-indigo-50 text-indigo-700"
                       : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50",
@@ -240,7 +423,8 @@ export default function Donate() {
           </div>
 
           <div className="mt-3 text-sm text-gray-700">
-            Intended amount: <span className="font-semibold text-gray-900">{donateLabel || "—"}</span>
+            Intended amount:{" "}
+            <span className="font-semibold text-gray-900">{donateLabel || "—"}</span>
           </div>
 
           {!amountOk && customAmountInput.trim().length > 0 ? (
@@ -250,26 +434,33 @@ export default function Donate() {
           ) : null}
         </div>
 
-        {/* Impact */}
         <div className="mt-6">
           <h3 className="text-lg font-semibold text-gray-900">Your impact</h3>
+
           <div className="mt-3 grid gap-3 sm:grid-cols-3">
             <div className="rounded-lg border border-gray-200 p-4">
               <div className="font-semibold text-gray-900">$10</div>
-              <div className="mt-1 text-sm text-gray-700">Helps provide learning materials for a student.</div>
+              <div className="mt-1 text-sm text-gray-700">
+                Helps provide learning materials for a student.
+              </div>
             </div>
+
             <div className="rounded-lg border border-gray-200 p-4">
               <div className="font-semibold text-gray-900">$25</div>
-              <div className="mt-1 text-sm text-gray-700">Helps support online class tools and infrastructure.</div>
+              <div className="mt-1 text-sm text-gray-700">
+                Helps support online class tools and infrastructure.
+              </div>
             </div>
+
             <div className="rounded-lg border border-gray-200 p-4">
               <div className="font-semibold text-gray-900">$50</div>
-              <div className="mt-1 text-sm text-gray-700">Helps support instructor preparation and class quality.</div>
+              <div className="mt-1 text-sm text-gray-700">
+                Helps support instructor preparation and class quality.
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Payment actions */}
         <div className="mt-6">
           <h3 className="text-lg font-semibold text-gray-900">Donate</h3>
 
@@ -279,10 +470,10 @@ export default function Donate() {
               onClick={() => startDonation("stripe")}
               disabled={!donationStatus.providers.stripe || !amountOk || loadingProvider !== null}
               className={[
-                "w-full rounded-lg px-4 py-3 text-sm font-semibold border",
-                "bg-indigo-600 text-white border-indigo-600",
+                "w-full rounded-lg border px-4 py-3 text-sm font-semibold",
+                "border-indigo-600 bg-indigo-600 text-white",
                 (!donationStatus.providers.stripe || !amountOk || loadingProvider !== null)
-                  ? "opacity-60 cursor-not-allowed"
+                  ? "cursor-not-allowed opacity-60"
                   : "hover:bg-indigo-500",
               ].join(" ")}
             >
@@ -291,32 +482,33 @@ export default function Donate() {
                 : `Donate ${donateLabel ? donateLabel : ""} with Card`}
             </button>
 
-            <button
-              type="button"
-              onClick={() => startDonation("paypal")}
-              disabled={!donationStatus.providers.paypal || !amountOk || loadingProvider !== null}
-              className={[
-                "w-full rounded-lg px-4 py-3 text-sm font-semibold border",
-                "bg-white text-gray-900 border-gray-200",
-                (!donationStatus.providers.paypal || !amountOk || loadingProvider !== null)
-                  ? "opacity-60 cursor-not-allowed"
-                  : "hover:bg-gray-50",
-              ].join(" ")}
-            >
-              {loadingProvider === "paypal"
-                ? "Redirecting..."
-                : `Donate ${donateLabel ? donateLabel : ""} with PayPal`}
-            </button>
+            <div className="rounded-lg border border-gray-200 p-3">
+              <div className="mb-2 text-sm font-semibold text-gray-900">
+                Donate {donateLabel ? donateLabel : ""} with PayPal
+              </div>
+
+              {!donationStatus.providers.paypal ? (
+                <div className="text-sm text-gray-600">PayPal is currently unavailable.</div>
+              ) : !amountOk ? (
+                <div className="text-sm text-gray-600">
+                  Enter a valid amount to continue with PayPal.
+                </div>
+              ) : !paypalReady ? (
+                <div className="text-sm text-gray-600">Loading secure PayPal checkout...</div>
+              ) : null}
+
+              <div ref={paypalButtonRef} />
+            </div>
 
             <button
               type="button"
               onClick={() => startDonation("crypto")}
               disabled={!donationStatus.providers.crypto || !amountOk || loadingProvider !== null}
               className={[
-                "w-full rounded-lg px-4 py-3 text-sm font-semibold border",
-                "bg-white text-gray-900 border-gray-200",
+                "w-full rounded-lg border px-4 py-3 text-sm font-semibold",
+                "border-gray-200 bg-white text-gray-900",
                 (!donationStatus.providers.crypto || !amountOk || loadingProvider !== null)
-                  ? "opacity-60 cursor-not-allowed"
+                  ? "cursor-not-allowed opacity-60"
                   : "hover:bg-gray-50",
               ].join(" ")}
             >
@@ -333,14 +525,9 @@ export default function Donate() {
           {error ? (
             <p className="mt-3 text-sm font-semibold text-red-600">{error}</p>
           ) : null}
-
-          <p className="mt-3 text-sm text-gray-600">
-            When enabled, donors will receive an email receipt from the payment provider for their records.
-          </p>
         </div>
       </section>
 
-      {/* Links */}
       <div className="mt-6 flex flex-wrap gap-4 text-sm">
         <Link href="/volunteer" className="font-semibold text-indigo-700 hover:underline">
           Volunteer

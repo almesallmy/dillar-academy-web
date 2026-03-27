@@ -52,12 +52,21 @@ const app = express();
  *  - DONATIONS_ENABLED
  *  - BASE_URL (e.g., https://dillaracademy.org)
  *  - STRIPE_SECRET_KEY
- *  - PAYPAL_DONATE_URL
+ *  - PAYPAL_CLIENT_ID
+ *  - PAYPAL_CLIENT_SECRET
+ *  - PAYPAL_ENV ("sandbox" or "live")
  *  - CRYPTO_DONATION_URL
  *
  * Placeholder handling:
  *  - If you set an env var to the literal string "placeholder", we treat it as unset and return 503.
  */
+
+function createPublicError(message, statusCode = 400) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  err.exposeMessage = true;
+  return err;
+}
 
 function isUnsetEnv(value) {
   const s = String(value || "").trim().toLowerCase();
@@ -70,15 +79,15 @@ function donationsEnabled() {
 }
 
 let _stripe = null;
+let _paypalAccessToken = null;
+let _paypalAccessTokenExpiresAt = 0;
 
 function getStripe() {
   if (_stripe) return _stripe;
 
   const key = process.env.STRIPE_SECRET_KEY;
   if (isUnsetEnv(key)) {
-    const err = new Error("Stripe is not configured");
-    err.statusCode = 503;
-    throw err;
+    throw createPublicError("Stripe is not configured", 503);
   }
 
   _stripe = new Stripe(key);
@@ -86,22 +95,48 @@ function getStripe() {
 }
 
 function getBaseUrl() {
-  const raw = String(process.env.BASE_URL || "").trim().replace(/\/+$/, ""); // remove trailing slash
+  const raw = String(process.env.BASE_URL || "").trim().replace(/\/+$/, "");
   if (isUnsetEnv(raw)) return "";
   if (!/^https?:\/\//i.test(raw)) return "";
   return raw;
 }
 
+function getPayPalClientId() {
+  const value = String(process.env.PAYPAL_CLIENT_ID || "").trim();
+  if (isUnsetEnv(value)) {
+    throw createPublicError("PayPal is not configured", 503);
+  }
+  return value;
+}
+
+function getPayPalClientSecret() {
+  const value = String(process.env.PAYPAL_CLIENT_SECRET || "").trim();
+  if (isUnsetEnv(value)) {
+    throw createPublicError("PayPal is not configured", 503);
+  }
+  return value;
+}
+
+function getPayPalApiBase() {
+  const env = String(process.env.PAYPAL_ENV || "sandbox").trim().toLowerCase();
+  return env === "live" ? "https://api-m.paypal.com" : "https://api-m.sandbox.paypal.com";
+}
+
 function getDonationStatus() {
   const enabled = donationsEnabled();
   const baseUrl = getBaseUrl();
+  const paypalClientId = String(process.env.PAYPAL_CLIENT_ID || "").trim();
+  const paypalClientSecret = String(process.env.PAYPAL_CLIENT_SECRET || "").trim();
 
   return {
     enabled,
     providers: {
       stripe: enabled && Boolean(baseUrl) && !isUnsetEnv(process.env.STRIPE_SECRET_KEY),
-      paypal: enabled && !isUnsetEnv(process.env.PAYPAL_DONATE_URL),
+      paypal: enabled && !isUnsetEnv(paypalClientId) && !isUnsetEnv(paypalClientSecret),
       crypto: enabled && !isUnsetEnv(process.env.CRYPTO_DONATION_URL),
+    },
+    publicConfig: {
+      paypalClientId: enabled && !isUnsetEnv(paypalClientId) ? paypalClientId : "",
     },
   };
 }
@@ -110,29 +145,99 @@ function parseAndValidateAmountUsd(amount) {
   const n = Number(amount);
 
   if (!Number.isFinite(n)) {
-    const err = new Error("Invalid amount");
-    err.statusCode = 400;
-    throw err;
+    throw createPublicError("Invalid amount", 400);
   }
 
-  // Sensible guardrails
   if (n < 1) {
-    const err = new Error("Minimum donation is $1");
-    err.statusCode = 400;
-    throw err;
-  }
-  if (n > 10000) {
-    const err = new Error("Maximum donation is $10,000");
-    err.statusCode = 400;
-    throw err;
+    throw createPublicError("Minimum donation is $1", 400);
   }
 
-  // Keep two decimals max (avoids weird floats like 10.0000002)
+  if (n > 10000) {
+    throw createPublicError("Maximum donation is $10,000", 400);
+  }
+
   return Math.round(n * 100) / 100;
+}
+
+function parseAndValidatePayPalOrderId(orderID) {
+  const value = String(orderID || "").trim();
+
+  if (!value) {
+    throw createPublicError("Invalid PayPal order ID", 400);
+  }
+
+  return value;
 }
 
 function dollarsToCents(amountUsd) {
   return Math.round(amountUsd * 100);
+}
+
+function getSafeDonationError(err, fallbackMessage) {
+  if (err?.exposeMessage) return err.message;
+  return fallbackMessage;
+}
+
+async function getPayPalAccessToken() {
+  const now = Date.now();
+
+  if (_paypalAccessToken && _paypalAccessTokenExpiresAt - 60_000 > now) {
+    return _paypalAccessToken;
+  }
+
+  const clientId = getPayPalClientId();
+  const clientSecret = getPayPalClientSecret();
+  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+
+  const response = await fetch(`${getPayPalApiBase()}/v1/oauth2/token`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Accept-Language": "en_US",
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: "grant_type=client_credentials",
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || !data?.access_token) {
+    const err = new Error("PayPal authentication failed");
+    err.statusCode = 502;
+    throw err;
+  }
+
+  _paypalAccessToken = data.access_token;
+  _paypalAccessTokenExpiresAt = now + (Number(data.expires_in) || 0) * 1000;
+
+  return _paypalAccessToken;
+}
+
+async function paypalRequest(path, { method = "GET", body, headers = {} } = {}) {
+  const accessToken = await getPayPalAccessToken();
+
+  const response = await fetch(`${getPayPalApiBase()}${path}`, {
+    method,
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      ...headers,
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const err = new Error("PayPal request failed");
+    err.statusCode = 502;
+    err.details = data;
+    throw err;
+  }
+
+  return data;
 }
 
 // --- Global middleware (order matters) ---------------------------------------
@@ -223,50 +328,39 @@ app.get("/api/donate/status", (_req, res) => {
 });
 
 /**
- * Donation session endpoint (Stripe + simple redirects for PayPal/Crypto)
+ * Donation session endpoint (Stripe + simple redirect for Crypto)
  * POST /api/donate/create-session
- * Body: { amount: number|string, provider?: "stripe"|"paypal"|"crypto" }
+ * Body: { amount: number|string, provider?: "stripe"|"crypto" }
  * Returns: { url: string }
  */
 app.post("/api/donate/create-session", async (req, res) => {
+  const providerKey = String(req.body?.provider || "stripe").trim().toLowerCase();
+
   try {
     const donationStatus = getDonationStatus();
 
     if (!donationStatus.enabled) {
-      return res.status(503).json({ error: "Donations are currently disabled" });
+      throw createPublicError("Donations are currently disabled", 503);
     }
 
-    const { amount, provider = "stripe" } = req.body || {};
-    const providerKey = String(provider || "stripe").trim().toLowerCase();
+    const { amount } = req.body || {};
     const amountUsd = parseAndValidateAmountUsd(amount);
 
-    // Provider: PayPal (frontend redirect; no server-side session)
-    if (providerKey === "paypal") {
-      if (!donationStatus.providers.paypal) {
-        return res.status(503).json({ error: "PayPal donations are not configured" });
-      }
-
-      const url = String(process.env.PAYPAL_DONATE_URL || "").trim();
-      return res.json({ url });
-    }
-
-    // Provider: Crypto (frontend redirect; set this to a trusted hosted checkout page)
     if (providerKey === "crypto") {
       if (!donationStatus.providers.crypto) {
-        return res.status(503).json({ error: "Crypto donations are not configured" });
+        throw createPublicError("Crypto donations are not configured", 503);
       }
 
       const url = String(process.env.CRYPTO_DONATION_URL || "").trim();
       return res.json({ url });
     }
 
-    // Provider: Stripe (Checkout session)
     if (providerKey !== "stripe") {
-      return res.status(400).json({ error: "Unknown provider" });
+      throw createPublicError("Unknown provider", 400);
     }
 
     if (!donationStatus.providers.stripe) {
-      return res.status(503).json({ error: "Stripe donations are not configured" });
+      throw createPublicError("Stripe donations are not configured", 503);
     }
 
     const baseUrl = getBaseUrl();
@@ -286,13 +380,9 @@ app.post("/api/donate/create-session", async (req, res) => {
           },
         },
       ],
-
-      // Optional invoice creation (enabled by default here)
       invoice_creation: { enabled: true },
-
       success_url: `${baseUrl}/donate/thank-you?m=stripe&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/donate?canceled=1&m=stripe`,
-
       metadata: {
         purpose: "donation",
         amount_usd: amountUsd.toFixed(2),
@@ -300,13 +390,110 @@ app.post("/api/donate/create-session", async (req, res) => {
     });
 
     if (!session?.url) {
-      return res.status(502).json({ error: "Stripe did not return a checkout URL" });
+      const err = new Error("Stripe did not return a checkout URL");
+      err.statusCode = 502;
+      throw err;
     }
 
     return res.json({ url: session.url });
   } catch (err) {
     console.error("Donate create-session error:", err);
-    return res.status(err?.statusCode || 500).json({ error: err?.message || "Donation session failed" });
+    return res
+      .status(err?.statusCode || 500)
+      .json({ error: getSafeDonationError(err, "Unable to start donation.") });
+  }
+});
+
+/**
+ * PayPal create order endpoint
+ * POST /api/donate/paypal/create-order
+ * Body: { amount: number|string }
+ * Returns: { orderID: string }
+ */
+app.post("/api/donate/paypal/create-order", async (req, res) => {
+  try {
+    const donationStatus = getDonationStatus();
+
+    if (!donationStatus.enabled) {
+      throw createPublicError("Donations are currently disabled", 503);
+    }
+
+    if (!donationStatus.providers.paypal) {
+      throw createPublicError("PayPal donations are not configured", 503);
+    }
+
+    const amountUsd = parseAndValidateAmountUsd(req.body?.amount);
+
+    const order = await paypalRequest("/v2/checkout/orders", {
+      method: "POST",
+      body: {
+        intent: "CAPTURE",
+        purchase_units: [
+          {
+            description: "Dillar Academy Donation",
+            custom_id: `donation:${amountUsd.toFixed(2)}`,
+            amount: {
+              currency_code: "USD",
+              value: amountUsd.toFixed(2),
+            },
+          },
+        ],
+      },
+    });
+
+    if (!order?.id) {
+      const err = new Error("PayPal did not return an order ID");
+      err.statusCode = 502;
+      throw err;
+    }
+
+    return res.json({ orderID: order.id });
+  } catch (err) {
+    console.error("PayPal create-order error:", err);
+    return res
+      .status(err?.statusCode || 500)
+      .json({ error: getSafeDonationError(err, "Unable to start PayPal checkout.") });
+  }
+});
+
+/**
+ * PayPal capture order endpoint
+ * POST /api/donate/paypal/capture-order
+ * Body: { orderID: string }
+ * Returns: { ok: true, orderID: string, status: string }
+ */
+app.post("/api/donate/paypal/capture-order", async (req, res) => {
+  try {
+    const donationStatus = getDonationStatus();
+
+    if (!donationStatus.enabled) {
+      throw createPublicError("Donations are currently disabled", 503);
+    }
+
+    if (!donationStatus.providers.paypal) {
+      throw createPublicError("PayPal donations are not configured", 503);
+    }
+
+    const orderID = parseAndValidatePayPalOrderId(req.body?.orderID);
+
+    const capture = await paypalRequest(`/v2/checkout/orders/${encodeURIComponent(orderID)}/capture`, {
+      method: "POST",
+      headers: {
+        "PayPal-Request-Id": `capture-${orderID}`,
+      },
+      body: {},
+    });
+
+    return res.json({
+      ok: true,
+      orderID: capture?.id || orderID,
+      status: capture?.status || "",
+    });
+  } catch (err) {
+    console.error("PayPal capture-order error:", err);
+    return res
+      .status(err?.statusCode || 500)
+      .json({ error: getSafeDonationError(err, "Unable to complete PayPal donation.") });
   }
 });
 
