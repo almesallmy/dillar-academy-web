@@ -3,13 +3,10 @@
  *
  * Donation landing page.
  * - UI is complete (mission, impact, amount selection).
- * - Payment actions are intentionally disabled until provider credentials are available.
- *
- * Enablement:
- * - Flip DONATIONS_ENABLED to true once providers are configured and wired.
+ * - Payment availability is controlled by the backend donation status endpoint.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
 
 /* -------------------------------------------------------------------------- */
@@ -20,7 +17,15 @@ const MIN_DONATION_USD = 1;
 const MAX_DONATION_USD = 10000;
 const PRESET_AMOUNTS_USD = [10, 25, 50, 100];
 
-const DONATIONS_ENABLED = false;
+const EMPTY_DONATION_STATUS = {
+  loaded: false,
+  enabled: false,
+  providers: {
+    stripe: false,
+    paypal: false,
+    crypto: false,
+  },
+};
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -68,6 +73,63 @@ function isAmountValid(amount) {
 export default function Donate() {
   const [selectedPreset, setSelectedPreset] = useState(25);
   const [customAmountInput, setCustomAmountInput] = useState("");
+  const [donationStatus, setDonationStatus] = useState(EMPTY_DONATION_STATUS);
+  const [loadingProvider, setLoadingProvider] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let isActive = true;
+
+    async function loadDonationStatus() {
+      try {
+        const resp = await fetch("/api/donate/status");
+        const data = await resp.json().catch(() => ({}));
+
+        if (!isActive) return;
+
+        if (!resp.ok) {
+          setDonationStatus({
+            loaded: true,
+            enabled: false,
+            providers: {
+              stripe: false,
+              paypal: false,
+              crypto: false,
+            },
+          });
+          return;
+        }
+
+        setDonationStatus({
+          loaded: true,
+          enabled: Boolean(data?.enabled),
+          providers: {
+            stripe: Boolean(data?.providers?.stripe),
+            paypal: Boolean(data?.providers?.paypal),
+            crypto: Boolean(data?.providers?.crypto),
+          },
+        });
+      } catch (_err) {
+        if (!isActive) return;
+
+        setDonationStatus({
+          loaded: true,
+          enabled: false,
+          providers: {
+            stripe: false,
+            paypal: false,
+            crypto: false,
+          },
+        });
+      }
+    }
+
+    loadDonationStatus();
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
 
   const amountUsd = useMemo(() => {
     const custom = customAmountInput.trim();
@@ -77,6 +139,53 @@ export default function Donate() {
 
   const amountOk = useMemo(() => isAmountValid(amountUsd), [amountUsd]);
   const donateLabel = amountOk ? `$${formatUsd(amountUsd)}` : "";
+
+  const availabilityMessage = !donationStatus.loaded
+    ? "Checking donation availability..."
+    : !donationStatus.enabled
+      ? "Online donations are currently unavailable."
+      : null;
+
+  async function startDonation(provider) {
+    try {
+      setError("");
+      setLoadingProvider(provider);
+
+      if (!amountOk) {
+        setError(`Enter a valid amount ($${MIN_DONATION_USD}–${MAX_DONATION_USD}).`);
+        return;
+      }
+
+      if (!donationStatus.providers?.[provider]) {
+        setError("This donation method is currently unavailable.");
+        return;
+      }
+
+      const resp = await fetch("/api/donate/create-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, amount: amountUsd }),
+      });
+
+      const data = await resp.json().catch(() => ({}));
+
+      if (!resp.ok) {
+        setError(data?.error || "Unable to start donation.");
+        return;
+      }
+
+      if (!data?.url) {
+        setError("Donation link unavailable.");
+        return;
+      }
+
+      window.location.assign(data.url);
+    } catch (_err) {
+      setError("Network error. Please try again.");
+    } finally {
+      setLoadingProvider(null);
+    }
+  }
 
   return (
     <main className="w-full max-w-3xl mx-auto px-4 py-10">
@@ -160,47 +269,70 @@ export default function Donate() {
           </div>
         </div>
 
-        {/* Payment actions (intentionally disabled) */}
+        {/* Payment actions */}
         <div className="mt-6">
           <h3 className="text-lg font-semibold text-gray-900">Donate</h3>
 
           <div className="mt-3 grid gap-3">
             <button
               type="button"
-              disabled={!DONATIONS_ENABLED || !amountOk}
+              onClick={() => startDonation("stripe")}
+              disabled={!donationStatus.providers.stripe || !amountOk || loadingProvider !== null}
               className={[
                 "w-full rounded-lg px-4 py-3 text-sm font-semibold border",
                 "bg-indigo-600 text-white border-indigo-600",
-                (!DONATIONS_ENABLED || !amountOk) ? "opacity-60 cursor-not-allowed" : "hover:bg-indigo-500",
+                (!donationStatus.providers.stripe || !amountOk || loadingProvider !== null)
+                  ? "opacity-60 cursor-not-allowed"
+                  : "hover:bg-indigo-500",
               ].join(" ")}
             >
-              Donate {donateLabel ? donateLabel : ""} with Card
+              {loadingProvider === "stripe"
+                ? "Redirecting..."
+                : `Donate ${donateLabel ? donateLabel : ""} with Card`}
             </button>
 
             <button
               type="button"
-              disabled={!DONATIONS_ENABLED || !amountOk}
+              onClick={() => startDonation("paypal")}
+              disabled={!donationStatus.providers.paypal || !amountOk || loadingProvider !== null}
               className={[
                 "w-full rounded-lg px-4 py-3 text-sm font-semibold border",
                 "bg-white text-gray-900 border-gray-200",
-                (!DONATIONS_ENABLED || !amountOk) ? "opacity-60 cursor-not-allowed" : "hover:bg-gray-50",
+                (!donationStatus.providers.paypal || !amountOk || loadingProvider !== null)
+                  ? "opacity-60 cursor-not-allowed"
+                  : "hover:bg-gray-50",
               ].join(" ")}
             >
-              Donate {donateLabel ? donateLabel : ""} with PayPal
+              {loadingProvider === "paypal"
+                ? "Redirecting..."
+                : `Donate ${donateLabel ? donateLabel : ""} with PayPal`}
             </button>
 
             <button
               type="button"
-              disabled={!DONATIONS_ENABLED || !amountOk}
+              onClick={() => startDonation("crypto")}
+              disabled={!donationStatus.providers.crypto || !amountOk || loadingProvider !== null}
               className={[
                 "w-full rounded-lg px-4 py-3 text-sm font-semibold border",
                 "bg-white text-gray-900 border-gray-200",
-                (!DONATIONS_ENABLED || !amountOk) ? "opacity-60 cursor-not-allowed" : "hover:bg-gray-50",
+                (!donationStatus.providers.crypto || !amountOk || loadingProvider !== null)
+                  ? "opacity-60 cursor-not-allowed"
+                  : "hover:bg-gray-50",
               ].join(" ")}
             >
-              Donate {donateLabel ? donateLabel : ""} with Crypto
+              {loadingProvider === "crypto"
+                ? "Redirecting..."
+                : `Donate ${donateLabel ? donateLabel : ""} with Crypto`}
             </button>
           </div>
+
+          {availabilityMessage ? (
+            <p className="mt-3 text-sm text-gray-600">{availabilityMessage}</p>
+          ) : null}
+
+          {error ? (
+            <p className="mt-3 text-sm font-semibold text-red-600">{error}</p>
+          ) : null}
 
           <p className="mt-3 text-sm text-gray-600">
             When enabled, donors will receive an email receipt from the payment provider for their records.
