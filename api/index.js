@@ -49,6 +49,7 @@ const app = express();
 /* -------------------------------------------------------------------------- */
 /**
  * Env vars used here:
+ *  - DONATIONS_ENABLED
  *  - BASE_URL (e.g., https://dillaracademy.org)
  *  - STRIPE_SECRET_KEY
  *  - PAYPAL_DONATE_URL
@@ -61,6 +62,11 @@ const app = express();
 function isUnsetEnv(value) {
   const s = String(value || "").trim().toLowerCase();
   return s.length === 0 || s === "placeholder";
+}
+
+function donationsEnabled() {
+  const value = String(process.env.DONATIONS_ENABLED || "").trim().toLowerCase();
+  return value === "1" || value === "true";
 }
 
 let _stripe = null;
@@ -84,6 +90,20 @@ function getBaseUrl() {
   if (isUnsetEnv(raw)) return "";
   if (!/^https?:\/\//i.test(raw)) return "";
   return raw;
+}
+
+function getDonationStatus() {
+  const enabled = donationsEnabled();
+  const baseUrl = getBaseUrl();
+
+  return {
+    enabled,
+    providers: {
+      stripe: enabled && Boolean(baseUrl) && !isUnsetEnv(process.env.STRIPE_SECRET_KEY),
+      paypal: enabled && !isUnsetEnv(process.env.PAYPAL_DONATE_URL),
+      crypto: enabled && !isUnsetEnv(process.env.CRYPTO_DONATION_URL),
+    },
+  };
 }
 
 function parseAndValidateAmountUsd(amount) {
@@ -197,6 +217,11 @@ app.use("/api/volunteer", volunteerRoutes);
 /* -------------------------------------------------------------------------- */
 /* Donations                                                                  */
 /* -------------------------------------------------------------------------- */
+
+app.get("/api/donate/status", (_req, res) => {
+  return res.json(getDonationStatus());
+});
+
 /**
  * Donation session endpoint (Stripe + simple redirects for PayPal/Crypto)
  * POST /api/donate/create-session
@@ -205,9 +230,10 @@ app.use("/api/volunteer", volunteerRoutes);
  */
 app.post("/api/donate/create-session", async (req, res) => {
   try {
-    const baseUrl = getBaseUrl();
-    if (!baseUrl) {
-      return res.status(503).json({ error: "Donations are not configured (BASE_URL)" });
+    const donationStatus = getDonationStatus();
+
+    if (!donationStatus.enabled) {
+      return res.status(503).json({ error: "Donations are currently disabled" });
     }
 
     const { amount, provider = "stripe" } = req.body || {};
@@ -216,15 +242,21 @@ app.post("/api/donate/create-session", async (req, res) => {
 
     // Provider: PayPal (frontend redirect; no server-side session)
     if (providerKey === "paypal") {
+      if (!donationStatus.providers.paypal) {
+        return res.status(503).json({ error: "PayPal donations are not configured" });
+      }
+
       const url = String(process.env.PAYPAL_DONATE_URL || "").trim();
-      if (isUnsetEnv(url)) return res.status(503).json({ error: "PayPal donations are not configured" });
       return res.json({ url });
     }
 
     // Provider: Crypto (frontend redirect; set this to a trusted hosted checkout page)
     if (providerKey === "crypto") {
+      if (!donationStatus.providers.crypto) {
+        return res.status(503).json({ error: "Crypto donations are not configured" });
+      }
+
       const url = String(process.env.CRYPTO_DONATION_URL || "").trim();
-      if (isUnsetEnv(url)) return res.status(503).json({ error: "Crypto donations are not configured" });
       return res.json({ url });
     }
 
@@ -233,6 +265,11 @@ app.post("/api/donate/create-session", async (req, res) => {
       return res.status(400).json({ error: "Unknown provider" });
     }
 
+    if (!donationStatus.providers.stripe) {
+      return res.status(503).json({ error: "Stripe donations are not configured" });
+    }
+
+    const baseUrl = getBaseUrl();
     const stripe = getStripe();
     const cents = dollarsToCents(amountUsd);
 
