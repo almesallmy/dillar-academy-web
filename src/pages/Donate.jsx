@@ -24,7 +24,6 @@ const EMPTY_DONATION_STATUS = {
   providers: {
     stripe: false,
     paypal: false,
-    crypto: false,
   },
   publicConfig: {
     paypalClientId: "",
@@ -163,7 +162,6 @@ export default function Donate() {
           providers: {
             stripe: Boolean(data?.providers?.stripe),
             paypal: Boolean(data?.providers?.paypal),
-            crypto: Boolean(data?.providers?.crypto),
           },
           publicConfig: {
             paypalClientId: String(data?.publicConfig?.paypalClientId || "").trim(),
@@ -499,23 +497,6 @@ export default function Donate() {
 
               <div ref={paypalButtonRef} />
             </div>
-
-            <button
-              type="button"
-              onClick={() => startDonation("crypto")}
-              disabled={!donationStatus.providers.crypto || !amountOk || loadingProvider !== null}
-              className={[
-                "w-full rounded-lg border px-4 py-3 text-sm font-semibold",
-                "border-gray-200 bg-white text-gray-900",
-                (!donationStatus.providers.crypto || !amountOk || loadingProvider !== null)
-                  ? "cursor-not-allowed opacity-60"
-                  : "hover:bg-gray-50",
-              ].join(" ")}
-            >
-              {loadingProvider === "crypto"
-                ? "Redirecting..."
-                : `Donate ${donateLabel ? donateLabel : ""} with Crypto`}
-            </button>
           </div>
 
           {availabilityMessage ? (

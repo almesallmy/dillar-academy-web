@@ -55,7 +55,6 @@ const app = express();
  *  - PAYPAL_CLIENT_ID
  *  - PAYPAL_CLIENT_SECRET
  *  - PAYPAL_ENV ("sandbox" or "live")
- *  - CRYPTO_DONATION_URL
  *
  * Placeholder handling:
  *  - If you set an env var to the literal string "placeholder", we treat it as unset and return 503.
@@ -133,7 +132,6 @@ function getDonationStatus() {
     providers: {
       stripe: enabled && Boolean(baseUrl) && !isUnsetEnv(process.env.STRIPE_SECRET_KEY),
       paypal: enabled && !isUnsetEnv(paypalClientId) && !isUnsetEnv(paypalClientSecret),
-      crypto: enabled && !isUnsetEnv(process.env.CRYPTO_DONATION_URL),
     },
     publicConfig: {
       paypalClientId: enabled && !isUnsetEnv(paypalClientId) ? paypalClientId : "",
@@ -328,9 +326,9 @@ app.get("/api/donate/status", (_req, res) => {
 });
 
 /**
- * Donation session endpoint (Stripe + simple redirect for Crypto)
+ * Donation session endpoint (Stripe Checkout)
  * POST /api/donate/create-session
- * Body: { amount: number|string, provider?: "stripe"|"crypto" }
+ * Body: { amount: number|string, provider?: "stripe" }
  * Returns: { url: string }
  */
 app.post("/api/donate/create-session", async (req, res) => {
@@ -345,15 +343,6 @@ app.post("/api/donate/create-session", async (req, res) => {
 
     const { amount } = req.body || {};
     const amountUsd = parseAndValidateAmountUsd(amount);
-
-    if (providerKey === "crypto") {
-      if (!donationStatus.providers.crypto) {
-        throw createPublicError("Crypto donations are not configured", 503);
-      }
-
-      const url = String(process.env.CRYPTO_DONATION_URL || "").trim();
-      return res.json({ url });
-    }
 
     if (providerKey !== "stripe") {
       throw createPublicError("Unknown provider", 400);
@@ -477,12 +466,12 @@ app.post("/api/donate/paypal/capture-order", async (req, res) => {
     const orderID = parseAndValidatePayPalOrderId(req.body?.orderID);
 
     const capture = await paypalRequest(`/v2/checkout/orders/${encodeURIComponent(orderID)}/capture`, {
-      method: "POST",
-      headers: {
-        "PayPal-Request-Id": `capture-${orderID}`,
-      },
-      body: {},
-    });
+        method: "POST",
+        headers: {
+          "PayPal-Request-Id": `capture-${orderID}`,
+        },
+        body: {},
+      });
 
     return res.json({
       ok: true,
